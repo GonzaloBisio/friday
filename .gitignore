@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment / secrets
+.env
+
+# SQLite databases
+*.db
+*.sqlite3
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Ruff
+.ruff_cache/
+
+# Streamlit
+.streamlit/
+
+# Claude
+.claude/
