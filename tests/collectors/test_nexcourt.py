@@ -1,6 +1,6 @@
 """Tests para friday.collectors.nexcourt — NexcourtCollector con HTTP mockeado."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,15 +24,6 @@ some_unrelated_metric 999
 """
 
 
-@pytest.fixture()
-def collector():
-    return NexcourtCollector(
-        base_url="http://localhost:8080",
-        services=["clubs-service", "users-service"],
-        api_key="test-key",
-    )
-
-
 def _mock_health_response(status="UP", status_code=200):
     resp = MagicMock()
     resp.status_code = status_code
@@ -47,10 +38,24 @@ def _mock_prometheus_response(text=SAMPLE_PROMETHEUS, status_code=200):
     return resp
 
 
+@pytest.fixture()
+def mock_client():
+    return MagicMock()
+
+
+@pytest.fixture()
+def collector(mock_client):
+    return NexcourtCollector(
+        base_url="http://localhost:8080",
+        services=["clubs-service", "users-service"],
+        api_key="test-key",
+        client=mock_client,
+    )
+
+
 class TestNexcourtCollectorHealth:
-    @patch("friday.collectors.nexcourt.httpx.get")
-    def test_healthy_service_returns_status_1(self, mock_get, collector):
-        mock_get.side_effect = [
+    def test_healthy_service_returns_status_1(self, mock_client, collector):
+        mock_client.get.side_effect = [
             _mock_health_response("UP"),
             _mock_prometheus_response(),
             _mock_health_response("UP"),
@@ -61,9 +66,8 @@ class TestNexcourtCollectorHealth:
         assert len(status_points) == 2
         assert all(p.value == 1.0 for p in status_points)
 
-    @patch("friday.collectors.nexcourt.httpx.get")
-    def test_down_service_returns_status_0(self, mock_get, collector):
-        mock_get.side_effect = [
+    def test_down_service_returns_status_0(self, mock_client, collector):
+        mock_client.get.side_effect = [
             _mock_health_response("DOWN"),
             _mock_health_response("UP"),
             _mock_prometheus_response(),
@@ -74,27 +78,25 @@ class TestNexcourtCollectorHealth:
         assert down.value == 0.0
         assert down.tags["health"] == "DOWN"
 
-    @patch("friday.collectors.nexcourt.httpx.get", side_effect=Exception("connection refused"))
-    def test_unreachable_service_returns_status_0(self, mock_get, collector):
+    def test_unreachable_service_returns_status_0(self, mock_client, collector):
+        mock_client.get.side_effect = Exception("connection refused")
         points = collector.collect()
         assert all(p.name == "status" for p in points)
         assert all(p.value == 0.0 for p in points)
 
-    @patch("friday.collectors.nexcourt.httpx.get")
-    def test_http_error_returns_down(self, mock_get, collector):
-        mock_get.return_value = _mock_health_response(status_code=503)
+    def test_http_error_returns_down(self, mock_client, collector):
+        mock_client.get.return_value = _mock_health_response(status_code=503)
         points = collector.collect()
         status_points = [p for p in points if p.name == "status"]
         assert all(p.value == 0.0 for p in status_points)
 
 
 class TestNexcourtCollectorPrometheus:
-    @patch("friday.collectors.nexcourt.httpx.get")
-    def test_parses_prometheus_metrics(self, mock_get, collector):
-        mock_get.side_effect = [
+    def test_parses_prometheus_metrics(self, mock_client, collector):
+        mock_client.get.side_effect = [
             _mock_health_response("UP"),
             _mock_prometheus_response(),
-            _mock_health_response("DOWN"),  # second service down, no prom fetch
+            _mock_health_response("DOWN"),
         ]
         points = collector.collect()
         prom_points = [p for p in points if p.name != "status"]
@@ -103,24 +105,23 @@ class TestNexcourtCollectorPrometheus:
         assert "jvm_memory_used_bytes" in names
         assert "process_cpu_usage" in names
 
-    @patch("friday.collectors.nexcourt.httpx.get")
-    def test_skips_prometheus_when_service_down(self, mock_get, collector):
-        mock_get.return_value = _mock_health_response("DOWN")
+    def test_skips_prometheus_when_service_down(self, mock_client, collector):
+        mock_client.get.return_value = _mock_health_response("DOWN")
         points = collector.collect()
         assert all(p.name == "status" for p in points)
 
 
 class TestNexcourtCollectorConfig:
     def test_empty_services_returns_empty(self):
-        c = NexcourtCollector(base_url="http://x", services=[], api_key="")
+        c = NexcourtCollector(base_url="http://x", services=[], api_key="", client=MagicMock())
         assert c.collect() == []
 
     def test_source_property(self, collector):
         assert collector.source == "nexcourt"
 
-    def test_run_wrapper(self, collector):
-        with patch("friday.collectors.nexcourt.httpx.get", side_effect=Exception("boom")):
-            points = collector.run()
+    def test_run_wrapper(self, mock_client, collector):
+        mock_client.get.side_effect = Exception("boom")
+        points = collector.run()
         assert isinstance(points, list)
 
 

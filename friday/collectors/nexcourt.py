@@ -19,17 +19,28 @@ METRICS_TIMEOUT = 10.0
 
 
 class NexcourtCollector(Collector):
-    """Consulta /actuator/health y /actuator/prometheus de cada servicio NEXCOURT."""
+    """Consulta /actuator/health y /actuator/prometheus de cada servicio NEXCOURT.
+
+    Usa un httpx.Client con connection pooling para reutilizar conexiones TCP.
+    """
 
     def __init__(
         self,
         base_url: str | None = None,
         services: list[str] | None = None,
         api_key: str | None = None,
+        client: httpx.Client | None = None,
     ) -> None:
         self._base_url = (base_url or settings.nexcourt_base_url).rstrip("/")
         self._services = services if services is not None else settings.nexcourt_services
         self._api_key = api_key or settings.nexcourt_api_key
+        self._client = client or self._build_client()
+
+    def _build_client(self) -> httpx.Client:
+        headers: dict[str, str] = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return httpx.Client(headers=headers, verify=False, timeout=METRICS_TIMEOUT)
 
     @property
     def source(self) -> str:
@@ -51,9 +62,8 @@ class NexcourtCollector(Collector):
     def _collect_service(self, service: str) -> list[MetricPoint]:
         now = MetricPoint.utcnow()
         points: list[MetricPoint] = []
-        headers = self._build_headers()
 
-        health = self._fetch_health(service, headers)
+        health = self._fetch_health(service)
         status_val = 1.0 if health == "UP" else 0.0
         points.append(MetricPoint(
             timestamp=now, source=self.source, name="status",
@@ -63,7 +73,7 @@ class NexcourtCollector(Collector):
         if status_val == 0.0:
             return points
 
-        prom_metrics = self._fetch_prometheus(service, headers)
+        prom_metrics = self._fetch_prometheus(service)
         for name, value in prom_metrics.items():
             points.append(MetricPoint(
                 timestamp=now, source=self.source, name=name,
@@ -72,16 +82,10 @@ class NexcourtCollector(Collector):
 
         return points
 
-    def _build_headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
-
-    def _fetch_health(self, service: str, headers: dict[str, str]) -> str:
+    def _fetch_health(self, service: str) -> str:
         url = f"{self._base_url}/{service}/actuator/health"
         try:
-            resp = httpx.get(url, headers=headers, timeout=HEALTH_TIMEOUT, verify=False)
+            resp = self._client.get(url, timeout=HEALTH_TIMEOUT)
             if resp.status_code == 200:
                 data = resp.json()
                 return data.get("status", "UNKNOWN")
@@ -90,10 +94,10 @@ class NexcourtCollector(Collector):
             logger.warning("Health check failed for %s: %s", service, exc)
             return "DOWN"
 
-    def _fetch_prometheus(self, service: str, headers: dict[str, str]) -> dict[str, float]:
+    def _fetch_prometheus(self, service: str) -> dict[str, float]:
         url = f"{self._base_url}/{service}/actuator/prometheus"
         try:
-            resp = httpx.get(url, headers=headers, timeout=METRICS_TIMEOUT, verify=False)
+            resp = self._client.get(url, timeout=METRICS_TIMEOUT)
             if resp.status_code != 200:
                 return {}
             return _parse_prometheus(resp.text)
