@@ -12,6 +12,11 @@ structlog>=24.0.0
 streamlit>=1.30.0
 plotly>=5.18.0
 
+# API
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=13.0
+
 # Dev / Testing
 pytest>=8.0.0
 pytest-mock>=3.12.0

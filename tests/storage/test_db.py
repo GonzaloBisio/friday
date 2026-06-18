@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from friday.storage.db import get_connection
+from friday.storage.db import get_connection, _SCHEMA_VERSION
 
 
 @pytest.fixture()
@@ -23,13 +23,15 @@ class TestGetConnection:
         }
         assert "metrics" in tables
         assert "_meta" in tables
+        assert "chat_sessions" in tables
+        assert "chat_messages" in tables
         conn.close()
 
     def test_schema_version_is_set(self, db_path):
         conn = get_connection(db_path)
         row = conn.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
         assert row is not None
-        assert int(row[0]) == 1
+        assert int(row[0]) == _SCHEMA_VERSION
         conn.close()
 
     def test_idempotent_migration(self, db_path):
@@ -38,7 +40,7 @@ class TestGetConnection:
         conn1.close()
         conn2 = get_connection(db_path)
         row = conn2.execute("SELECT value FROM _meta WHERE key='schema_version'").fetchone()
-        assert int(row[0]) == 1
+        assert int(row[0]) == _SCHEMA_VERSION
         conn2.close()
 
     def test_index_exists(self, db_path):
@@ -50,4 +52,5 @@ class TestGetConnection:
             ).fetchall()
         }
         assert "idx_metrics_source_name_ts" in indexes
+        assert "idx_chat_messages_session" in indexes
         conn.close()

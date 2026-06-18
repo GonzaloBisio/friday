@@ -1,10 +1,14 @@
-"""Tests para friday.collectors.nexcourt — NexcourtCollector con HTTP mockeado."""
+"""Tests para friday.collectors.nexcourt — NexcourtCollector con HTTP mockeado.
+
+Cubre modos "direct" (management ports) y "kong" (gateway health).
+"""
 
 from unittest.mock import MagicMock
 
 import pytest
 
 from friday.collectors.nexcourt import NexcourtCollector, _parse_prometheus
+from friday.collectors.nexcourt import _SERVICE_MGMT_PORTS, _SERVICE_KONG_PATHS
 
 
 SAMPLE_PROMETHEUS = """\
@@ -45,15 +49,30 @@ def mock_client():
 
 @pytest.fixture()
 def collector(mock_client):
+    """Collector en modo direct con dos servicios."""
     return NexcourtCollector(
-        base_url="http://localhost:8080",
-        services=["clubs-service", "users-service"],
+        mode="direct",
+        direct_host="http://localhost",
+        services=["clubs-service", "reservations-service"],
         api_key="test-key",
         client=mock_client,
     )
 
 
-class TestNexcourtCollectorHealth:
+@pytest.fixture()
+def kong_collector(mock_client):
+    """Collector en modo kong (solo health, sin prometheus)."""
+    return NexcourtCollector(
+        mode="kong",
+        kong_url="https://dev-api.nexcourts.com",
+        services=["clubs-service", "reservations-service"],
+        client=mock_client,
+    )
+
+
+# ── Direct mode: health ──────────────────────────────────────────────────
+
+class TestDirectModeHealth:
     def test_healthy_service_returns_status_1(self, mock_client, collector):
         mock_client.get.side_effect = [
             _mock_health_response("UP"),
@@ -90,8 +109,21 @@ class TestNexcourtCollectorHealth:
         status_points = [p for p in points if p.name == "status"]
         assert all(p.value == 0.0 for p in status_points)
 
+    def test_uses_management_port_for_health(self, collector):
+        """Verifica que en modo direct use el puerto de gestión 908x."""
+        url = collector._health_url("clubs-service")
+        assert f":{_SERVICE_MGMT_PORTS['clubs-service']}" in url
+        assert "/actuator/health" in url
 
-class TestNexcourtCollectorPrometheus:
+    def test_unknown_service_uses_legacy_url(self, collector):
+        """Servicio sin puerto mapeado cae a URL legacy."""
+        url = collector._health_url("unknown-service")
+        assert "/unknown-service/actuator/health" in url
+
+
+# ── Direct mode: prometheus ──────────────────────────────────────────────
+
+class TestDirectModePrometheus:
     def test_parses_prometheus_metrics(self, mock_client, collector):
         mock_client.get.side_effect = [
             _mock_health_response("UP"),
@@ -110,10 +142,52 @@ class TestNexcourtCollectorPrometheus:
         points = collector.collect()
         assert all(p.name == "status" for p in points)
 
+    def test_prometheus_fetch_uses_management_port(self, collector):
+        url = collector._metrics_url("clubs-service")
+        assert f":{_SERVICE_MGMT_PORTS['clubs-service']}" in url
+        assert "/actuator/prometheus" in url
+
+
+# ── Kong mode ────────────────────────────────────────────────────────────
+
+class TestKongMode:
+    def test_health_url_uses_kong_path(self, kong_collector):
+        url = kong_collector._health_url("clubs-service")
+        assert "dev-api.nexcourts.com" in url
+        assert f"/health/{_SERVICE_KONG_PATHS['clubs-service']}" in url
+
+    def test_kong_mode_skips_prometheus(self, mock_client, kong_collector):
+        """En modo kong no se fetchea Prometheus (no expuesto por Kong)."""
+        mock_client.get.side_effect = [
+            _mock_health_response("UP"),
+            _mock_health_response("UP"),
+        ]
+        points = kong_collector.collect()
+        # Solo status, sin métricas prometheus
+        prom_points = [p for p in points if p.name != "status"]
+        assert len(prom_points) == 0
+
+    def test_metrics_url_empty_in_kong_mode(self, kong_collector):
+        url = kong_collector._metrics_url("clubs-service")
+        assert url == ""
+
+    def test_healthy_kong_service_returns_status_1(self, mock_client, kong_collector):
+        mock_client.get.return_value = _mock_health_response("UP")
+        points = kong_collector.collect()
+        status_points = [p for p in points if p.name == "status"]
+        assert all(p.value == 1.0 for p in status_points)
+
+    def test_down_kong_service_returns_status_0(self, mock_client, kong_collector):
+        mock_client.get.return_value = _mock_health_response("DOWN")
+        points = kong_collector.collect()
+        assert all(p.value == 0.0 for p in points)
+
+
+# ── Config & edge cases ──────────────────────────────────────────────────
 
 class TestNexcourtCollectorConfig:
     def test_empty_services_returns_empty(self):
-        c = NexcourtCollector(base_url="http://x", services=[], api_key="", client=MagicMock())
+        c = NexcourtCollector(mode="direct", direct_host="http://x", services=[], client=MagicMock())
         assert c.collect() == []
 
     def test_source_property(self, collector):
@@ -124,6 +198,8 @@ class TestNexcourtCollectorConfig:
         points = collector.run()
         assert isinstance(points, list)
 
+
+# ── Prometheus parser ────────────────────────────────────────────────────
 
 class TestParsePrometheus:
     def test_parses_known_metrics(self):

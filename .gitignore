@@ -43,3 +43,5 @@ htmlcov/
 
 # Claude
 .claude/
+friday.db-shm
+friday.db-wal

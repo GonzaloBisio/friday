@@ -1,16 +1,18 @@
-"""Tests para friday.core.brain — FridayBrain con SDK de Gemini mockeado."""
+"""Tests para friday.core.brain — FridayBrain con SDK de Gemini mockeado.
 
-from unittest.mock import MagicMock, patch, PropertyMock
+Actualizado para modelo adaptativo y persistencia de chat (ChatResult).
+"""
+
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from friday.collectors.gemini_usage import GeminiTracker
-from friday.core.brain import FridayBrain, _extract_text, MAX_TOOL_ROUNDS
+from friday.core.brain import FridayBrain, ChatResult, _extract_text, MAX_TOOL_ROUNDS
 from friday.core.tools_registry import ToolsRegistry
 
 
 def _make_text_response(text: str, tokens_in: int = 10, tokens_out: int = 5):
-    """Crea un mock de GenerateContentResponse con texto puro."""
     part = MagicMock()
     part.function_call = None
     part.text = text
@@ -32,7 +34,6 @@ def _make_text_response(text: str, tokens_in: int = 10, tokens_out: int = 5):
 
 
 def _make_fc_response(name: str, args: dict, tokens_in: int = 10, tokens_out: int = 5):
-    """Crea un mock de GenerateContentResponse con un function_call."""
     fc = MagicMock()
     fc.name = name
     fc.args = args
@@ -70,7 +71,12 @@ def registry():
         """Suma dos números."""
         return str(a + b)
 
+    def consultar_metricas(source: str, name: str | None = None,
+                           horas: int = 24, limit: int = 50) -> str:
+        return '[{"value": 42}]'
+
     reg.register(sumar)
+    reg.register(consultar_metricas)
     return reg
 
 
@@ -93,7 +99,9 @@ class TestBrainTextResponse:
     def test_simple_text_response(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("Hola, soy FRIDAY")
         result = brain.chat("Hola")
-        assert result == "Hola, soy FRIDAY"
+        assert isinstance(result, ChatResult)
+        assert result.text == "Hola, soy FRIDAY"
+        assert result.model == "gemini-2.5-flash"
 
     def test_tracks_usage(self, brain, tracker):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok", tokens_in=100, tokens_out=50)
@@ -116,7 +124,7 @@ class TestBrainFunctionCalling:
         brain._mock_client.models.generate_content.side_effect = [fc_resp, text_resp]
 
         result = brain.chat("Sumá 3 + 7")
-        assert "10" in result
+        assert "10" in result.text
         assert brain._mock_client.models.generate_content.call_count == 2
 
     def test_tracks_usage_for_each_round(self, brain, tracker):
@@ -124,13 +132,15 @@ class TestBrainFunctionCalling:
         text_resp = _make_text_response("3", tokens_in=30, tokens_out=15)
         brain._mock_client.models.generate_content.side_effect = [fc_resp, text_resp]
 
-        brain.chat("1+2")
+        result = brain.chat("1+2")
         totals = tracker.totals
         assert totals["requests"] == 2
         assert totals["tokens_in"] == 50
         assert totals["tokens_out"] == 25
+        assert result.tokens_in == 50
+        assert result.tokens_out == 25
 
-    def test_tool_error_returns_error_string(self, brain):
+    def test_tool_error_continues(self, brain):
         fc_resp = _make_fc_response("inexistente", {})
         text_resp = _make_text_response("No pude ejecutar eso")
         brain._mock_client.models.generate_content.side_effect = [fc_resp, text_resp]
@@ -143,7 +153,7 @@ class TestBrainFunctionCalling:
         brain._mock_client.models.generate_content.return_value = fc_resp
 
         result = brain.chat("loop infinito")
-        assert "límite" in result
+        assert "límite" in result.text
         assert brain._mock_client.models.generate_content.call_count == MAX_TOOL_ROUNDS
 
 
@@ -163,6 +173,34 @@ class TestBrainNoUsageMetadata:
         brain._mock_client.models.generate_content.return_value = resp
         brain.chat("test")
         assert tracker.totals["requests"] == 0
+
+
+class TestAdaptiveModel:
+    def test_explicit_flash_model(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
+        result = brain.chat("cpu status", model="flash")
+        assert result.model == "gemini-2.5-flash"
+
+    def test_explicit_pro_model(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
+        result = brain.chat("explícame la teoría de la relatividad", model="pro")
+        assert result.model == "gemini-2.5-pro"
+
+    def test_auto_classifies_short_metric_query_as_flash(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("42%")
+        result = brain.chat("cómo viene la cpu")
+        assert result.model == "gemini-2.5-flash"
+
+    def test_auto_classifies_long_message_as_pro(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
+        long_msg = "Necesito que analices " + "el rendimiento del sistema " * 10
+        result = brain.chat(long_msg)
+        assert result.model == "gemini-2.5-pro"
+
+    def test_auto_defaults_to_flash(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
+        result = brain.chat("hola")
+        assert result.model == "gemini-2.5-flash"
 
 
 class TestExtractText:
