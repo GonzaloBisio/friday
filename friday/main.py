@@ -39,7 +39,7 @@ def _make_job(collector: Collector, repo: MetricsRepository):
 def main() -> None:
     logger.info("FRIDAY starting — DB: %s", settings.db_path)
 
-    conn = get_connection(settings.db_path)
+    conn = get_connection(settings.db_path, check_same_thread=False)
     repo = MetricsRepository(conn)
 
     collectors: list[Collector] = [

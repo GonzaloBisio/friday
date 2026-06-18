@@ -7,6 +7,7 @@ readme = "README.md"
 
 [project.scripts]
 friday = "friday.app:main"
+friday-wake = "friday.voice.wake:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

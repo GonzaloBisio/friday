@@ -48,7 +48,7 @@ class FridaySystem:
     def __init__(self) -> None:
         logger.info("Inicializando FRIDAY — DB: %s", settings.db_path)
 
-        self.conn = get_connection(settings.db_path)
+        self.conn = get_connection(settings.db_path, check_same_thread=False)
         self.repo = MetricsRepository(self.conn)
         self.chat_repo = ChatRepository(self.conn)
         self.notif_repo = NotificationRepository(self.conn)

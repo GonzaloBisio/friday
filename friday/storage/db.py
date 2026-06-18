@@ -77,7 +77,11 @@ ON notifications (created_at DESC);
 
 
 def get_connection(db_path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
-    """Abre (o crea) la DB y aplica migraciones pendientes."""
+    """Abre (o crea) la DB y aplica migraciones pendientes.
+
+    Usa check_same_thread=False en producción porque APScheduler
+    ejecuta jobs en threads separados del thread principal.
+    """
     conn = sqlite3.connect(str(db_path), check_same_thread=check_same_thread)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
