@@ -96,6 +96,29 @@ class TestAgentRun:
         assert resp.json()["status"] == "error"
 
 
+class TestAgentActivity:
+    def test_activity_returns_recorded_events(self, client):
+        from friday.core.activity import activity_log
+        activity_log.clear()
+        activity_log.record("cargar_gasto", "running", "monto=10000")
+        activity_log.record("cargar_gasto", "ok", "Anotado")
+
+        resp = client.get("/api/agent/activity")
+        assert resp.status_code == 200
+        events = resp.json()["events"]
+        assert len(events) == 2
+        assert events[-1]["status"] == "ok"
+        assert events[0]["tool"] == "cargar_gasto"
+
+    def test_activity_respects_n(self, client):
+        from friday.core.activity import activity_log
+        activity_log.clear()
+        for i in range(10):
+            activity_log.record(f"t{i}", "ok")
+        resp = client.get("/api/agent/activity?n=3")
+        assert len(resp.json()["events"]) == 3
+
+
 class TestAgentConfirm:
     def test_confirm_approved_executes(self, client, gate):
         # Primero creamos una acción pendiente

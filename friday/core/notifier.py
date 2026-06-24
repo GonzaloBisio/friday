@@ -20,15 +20,9 @@ from friday.storage.notification_repo import Notification, NotificationRepositor
 
 logger = logging.getLogger(__name__)
 
-# ── Umbrales (configurables en .env en el futuro) ────────────────────────
-CPU_WARN = 70.0
-CPU_CRIT = 90.0
-RAM_WARN = 80.0
-RAM_CRIT = 95.0
-DISK_WARN = 85.0
-DISK_CRIT = 95.0
-GEMINI_COST_DAILY_WARN = 0.50  # USD
-GEMINI_COST_DAILY_CRIT = 2.00
+# Los umbrales viven en `settings.notifier_*` (config.py + .env). Se leen en
+# RUNTIME dentro de cada chequeo —no como constantes de módulo— para que el
+# .env mande de verdad y un test pueda overridear settings sin reimportar.
 
 
 class Notifier:
@@ -69,21 +63,21 @@ class Notifier:
         if cpu:
             notifs.extend(self._threshold_check(
                 key="cpu", value=cpu.value,
-                warn=CPU_WARN, crit=CPU_CRIT,
+                warn=settings.notifier_cpu_warn, crit=settings.notifier_cpu_crit,
                 unit="%", label="CPU",
             ))
 
         if ram:
             notifs.extend(self._threshold_check(
                 key="ram", value=ram.value,
-                warn=RAM_WARN, crit=RAM_CRIT,
+                warn=settings.notifier_ram_warn, crit=settings.notifier_ram_crit,
                 unit="%", label="RAM",
             ))
 
         if disk:
             notifs.extend(self._threshold_check(
                 key="disk", value=disk.value,
-                warn=DISK_WARN, crit=DISK_CRIT,
+                warn=settings.notifier_disk_warn, crit=settings.notifier_disk_crit,
                 unit="%", label="Disco",
             ))
 
@@ -142,8 +136,8 @@ class Notifier:
         return self._threshold_check(
             key="gemini_cost",
             value=total_cost,
-            warn=GEMINI_COST_DAILY_WARN,
-            crit=GEMINI_COST_DAILY_CRIT,
+            warn=settings.notifier_gemini_cost_daily_warn,
+            crit=settings.notifier_gemini_cost_daily_crit,
             unit="USD",
             label="Costo Gemini",
         )

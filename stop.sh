@@ -1,35 +1,46 @@
 #!/bin/bash
 # ===================================================================
 # FRIDAY — Stop script (WSL)
-# Detiene el proceso de Friday de forma elegante.
+# Detiene TODOS los procesos de Friday (API + Dashboard + Scheduler)
+# sin importar cómo fueron arrancados, más Ollama.
 # ===================================================================
 
-set -euo pipefail
+set +e  # no morir si un pkill no encuentra nada
 
 PROJECT_DIR="/home/gonzalo/dev/personal/friday"
 PIDFILE="$PROJECT_DIR/.friday.pid"
 LOGFILE="$PROJECT_DIR/friday.log"
+SHUTDOWN_SCRIPT="$PROJECT_DIR/friday/voice/shutdown_friday.sh"
 
-if [ ! -f "$PIDFILE" ]; then
-    echo "FRIDAY no está corriendo (no se encontró $PIDFILE)"
-    exit 1
-fi
+echo "[$(date)] Deteniendo FRIDAY..." | tee -a "$LOGFILE"
 
-PID=$(cat "$PIDFILE")
-
-if kill -0 "$PID" 2>/dev/null; then
-    echo "[$(date)] Deteniendo FRIDAY (PID $PID)..." | tee -a "$LOGFILE"
-    kill "$PID"
-    sleep 2
-
+# 1. Matar por PID si hay pidfile (arranque via start.sh)
+if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE")
     if kill -0 "$PID" 2>/dev/null; then
-        echo "Forzando cierre..." | tee -a "$LOGFILE"
-        kill -9 "$PID"
+        kill "$PID" 2>/dev/null
+        sleep 1
+        kill -9 "$PID" 2>/dev/null
+        echo "  PID $PID terminado."
     fi
-
-    rm -f "$PIDFILE"
-    echo "[$(date)] FRIDAY detenido." | tee -a "$LOGFILE"
-else
-    echo "El proceso $PID ya no existe. Limpiando pidfile..."
     rm -f "$PIDFILE"
 fi
+
+# 2. Matar por patrón + puerto (cubre arranque via launch_friday/windows_wake.py,
+#    ./venv/bin/friday, o cualquier otro método).
+if [ -x "$SHUTDOWN_SCRIPT" ]; then
+    bash "$SHUTDOWN_SCRIPT" > /dev/null 2>&1
+else
+    # Fallback si el script no existe (no debería pasar)
+    pkill -9 -f 'friday\.app' 2>/dev/null
+    pkill -9 -f 'venv/bin/friday' 2>/dev/null
+    pkill -9 -f 'streamlit run' 2>/dev/null
+    sleep 0.5
+    fuser -k 8000/tcp 2>/dev/null
+    fuser -k 8510/tcp 2>/dev/null
+    pkill -9 ollama 2>/dev/null
+    pkill -9 llama 2>/dev/null
+    sleep 1
+fi
+
+echo "[$(date)] FRIDAY detenido." | tee -a "$LOGFILE"

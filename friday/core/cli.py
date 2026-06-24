@@ -5,24 +5,25 @@ from __future__ import annotations
 import sys
 
 from friday.config import settings
-from friday.core.brain import FridayBrain
+from friday.core.brain_factory import build_brain
 from friday.core.tools_registry import build_registry
 from friday.storage.db import get_connection
 from friday.storage.metrics_repo import MetricsRepository
 
 
 def main() -> None:
-    if not settings.gemini_api_key:
-        print("Error: GEMINI_API_KEY no configurada en .env")
-        sys.exit(1)
-
     conn = get_connection(settings.db_path)
     repo = MetricsRepository(conn)
     registry = build_registry(repo)
-    brain = FridayBrain(registry=registry)
+    brain = build_brain(registry=registry)
+
+    if brain is None:
+        print(f"Error: no hay cerebro disponible (llm_provider={settings.llm_provider}).")
+        print("Configurá Ollama (local) o GEMINI_API_KEY en .env.")
+        sys.exit(1)
 
     print("FRIDAY CLI — escribí tu mensaje (Ctrl+C para salir)")
-    print(f"Modelo: {settings.gemini_model_fast}")
+    print(f"Modelo: {brain.model}")
     print(f"Tools: {', '.join(registry.names)}")
     print("-" * 50)
 
@@ -43,7 +44,7 @@ def main() -> None:
                 continue
 
             response = brain.chat(user_input)
-            print(f"\nFRIDAY > {response}")
+            print(f"\nFRIDAY > {response.text}")
     except KeyboardInterrupt:
         pass
 

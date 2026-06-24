@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from friday.collectors.gemini_usage import GeminiTracker
+from friday.config import settings
 from friday.core.brain import FridayBrain, ChatResult, _extract_text, MAX_TOOL_ROUNDS
 from friday.core.tools_registry import ToolsRegistry
 
@@ -101,7 +102,7 @@ class TestBrainTextResponse:
         result = brain.chat("Hola")
         assert isinstance(result, ChatResult)
         assert result.text == "Hola, soy FRIDAY"
-        assert result.model == "gemini-2.5-flash"
+        assert result.model == settings.gemini_model_fast
 
     def test_tracks_usage(self, brain, tracker):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok", tokens_in=100, tokens_out=50)
@@ -179,7 +180,7 @@ class TestAdaptiveModel:
     def test_explicit_flash_model(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
         result = brain.chat("cpu status", model="flash")
-        assert result.model == "gemini-2.5-flash"
+        assert result.model == settings.gemini_model_fast
 
     def test_explicit_pro_model(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
@@ -189,18 +190,135 @@ class TestAdaptiveModel:
     def test_auto_classifies_short_metric_query_as_flash(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("42%")
         result = brain.chat("cómo viene la cpu")
-        assert result.model == "gemini-2.5-flash"
+        assert result.model == settings.gemini_model_fast
 
-    def test_auto_classifies_long_message_as_pro(self, brain):
+    def test_auto_classifies_long_message_as_balanced(self, brain):
+        # AUTO nunca debe escalar a pro (free tier ínfimo → 429). Mensaje largo
+        # va al escalón balanceado (2.5-flash). Pro solo bajo pedido explícito.
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
         long_msg = "Necesito que analices " + "el rendimiento del sistema " * 10
         result = brain.chat(long_msg)
-        assert result.model == "gemini-2.5-pro"
+        assert result.model == settings.gemini_model_balanced
+        assert result.model != "gemini-2.5-pro"
 
     def test_auto_defaults_to_flash(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
         result = brain.chat("hola")
-        assert result.model == "gemini-2.5-flash"
+        assert result.model == settings.gemini_model_fast
+
+
+class TestQuotaFallback:
+    """Cuando Gemini se queda sin cuota (429), FRIDAY no debe quedar muda:
+    degrada a Ollama local en vez de propagar el error."""
+
+    def _quota_error(self):
+        from google.genai import errors
+        return errors.ClientError(
+            429, {"error": {"message": "quota", "status": "RESOURCE_EXHAUSTED", "code": 429}}
+        )
+
+    def test_429_falls_back_to_ollama(self, brain):
+        brain._mock_client.models.generate_content.side_effect = self._quota_error()
+        with patch("friday.core.ollama_brain.OllamaBrain") as mock_ollama_cls:
+            mock_ollama_cls.return_value.reply.return_value = ChatResult(
+                text="Respondo local, sir.", model="qwen2.5:7b",
+            )
+            result = brain.chat("cómo viene la cpu")
+        assert result.text == "Respondo local, sir."
+        assert result.model == "qwen2.5:7b"
+        # Contexto compartido: continúa el hilo con reply() (no re-agrega el user).
+        mock_ollama_cls.return_value.reply.assert_called_once_with()
+        # Y se le pasa el MISMO repo + sesión: así carga la conversación de la DB.
+        ckw = mock_ollama_cls.call_args.kwargs
+        assert ckw["chat_repo"] is brain._chat_repo
+        assert ckw["session_id"] == brain._session_id
+
+    def test_non_429_client_error_propagates(self, brain):
+        from google.genai import errors
+        bad_request = errors.ClientError(
+            400, {"error": {"message": "bad", "status": "INVALID_ARGUMENT", "code": 400}}
+        )
+        brain._mock_client.models.generate_content.side_effect = bad_request
+        with pytest.raises(errors.ClientError):
+            brain.chat("hola")
+
+
+class TestHistoryWindow:
+    """La ventana de historial acota los tokens: el brain es singleton y sin
+    techo el contexto crece sin parar. Recorta en bordes de turno."""
+
+    def test_trim_keeps_last_n_turns(self, brain):
+        from google.genai import types
+        brain._history = []
+        for i in range(20):
+            brain._history.append(
+                types.Content(role="user", parts=[types.Part(text=f"q{i}")])
+            )
+            brain._history.append(
+                types.Content(role="model", parts=[types.Part(text=f"a{i}")])
+            )
+        brain._trim_history()
+        starts = [c for c in brain._history if c.role == "user"]
+        assert len(starts) == settings.chat_history_window
+        assert starts[0].parts[0].text == f"q{20 - settings.chat_history_window}"
+
+    def test_trim_cuts_on_turn_boundary_not_mid_tool(self, brain):
+        from google.genai import types
+        brain._history = []
+        for i in range(20):
+            brain._history.append(
+                types.Content(role="user", parts=[types.Part(text=f"q{i}")])
+            )
+            brain._history.append(types.Content(
+                role="model",
+                parts=[types.Part(function_call=types.FunctionCall(name="t", args={}))],
+            ))
+            brain._history.append(types.Content(
+                role="user",
+                parts=[types.Part(function_response=types.FunctionResponse(
+                    name="t", response={"result": "x"}))],
+            ))
+            brain._history.append(
+                types.Content(role="model", parts=[types.Part(text=f"a{i}")])
+            )
+        brain._trim_history()
+        first = brain._history[0]
+        # Nunca arrancamos en un function_response huérfano: el primer elemento
+        # es un mensaje de usuario CON texto (un borde de turno real).
+        assert first.role == "user"
+        assert first.parts[0].text is not None
+
+    def test_no_trim_when_under_window(self, brain):
+        from google.genai import types
+        brain._history = [
+            types.Content(role="user", parts=[types.Part(text="hola")]),
+            types.Content(role="model", parts=[types.Part(text="buenas")]),
+        ]
+        brain._trim_history()
+        assert len(brain._history) == 2
+
+
+class TestCompose:
+    """compose() es one-shot: genera texto sin tocar el historial ni persistir.
+    Lo usan los rituales (Pilar 2) para no contaminar la charla del usuario."""
+
+    def test_returns_text(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("Morning, sir.")
+        assert brain.compose("brief me") == "Morning, sir."
+
+    def test_does_not_touch_history(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
+        before = len(brain._history)
+        brain.compose("brief me")
+        assert len(brain._history) == before  # one-shot: historial intacto
+
+    def test_tracks_usage(self, brain, tracker):
+        brain._mock_client.models.generate_content.return_value = _make_text_response(
+            "ok", tokens_in=40, tokens_out=12,
+        )
+        brain.compose("brief me")
+        assert tracker.totals["tokens_in"] == 40
+        assert tracker.totals["tokens_out"] == 12
 
 
 class TestExtractText:

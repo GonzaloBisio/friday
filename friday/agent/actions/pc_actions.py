@@ -2,28 +2,239 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 import platform
+import subprocess
+import urllib.parse
 from pathlib import Path
 
 import psutil
 
 
+# Alias comunes → target de lanzamiento en Windows. Las URIs (spotify:, whatsapp:)
+# son lo más confiable para apps de Store/Electron.
+_WINDOWS_APP_TARGETS = {
+    "spotify": "spotify:",
+    "whatsapp": "whatsapp:",
+    "chrome": "chrome",
+    "google chrome": "chrome",
+    "edge": "msedge",
+    "firefox": "firefox",
+    "notepad": "notepad",
+    "bloc de notas": "notepad",
+    "calculadora": "calc",
+    "calculator": "calc",
+    "calc": "calc",
+    "explorador": "explorer",
+    "explorer": "explorer",
+    "terminal": "wt",
+    "vscode": "code",
+    "code": "code",
+    "visual studio code": "code",
+}
+
+# Caracteres de control de shell — se rechazan en targets sin mapear (anti-inyección).
+_UNSAFE_CHARS = set('&|<>^%"\n\r')
+
+# Alias → nombre(s) del proceso (.exe) para cerrar en Windows. taskkill
+# matchea por IMAGE NAME (insensible a mayúsculas).
+#
+# Algunas apps son UWP/Store: el launcher (calc.exe) arranca la app real
+# (CalculatorApp.exe) y se AUTOCIERRA. Por eso algunos alias tienen una
+# LISTA de procesos a probar en orden — si el primero no está, prueba el
+# siguiente. Sin esto, taskkill /IM calc.exe encuentra nada porque calc.exe
+# ya exitó.
+_WINDOWS_KILL_TARGETS: dict[str, str | list[str]] = {
+    "spotify": "Spotify.exe",
+    "whatsapp": "WhatsApp.exe",
+    "chrome": "chrome.exe",
+    "google chrome": "chrome.exe",
+    "edge": "msedge.exe",
+    "firefox": "firefox.exe",
+    "notepad": "notepad.exe",
+    "bloc de notas": "notepad.exe",
+    # Calculator es UWP en Win11: calc.exe es solo el launcher. El proceso
+    # real es CalculatorApp.exe. Probar ambos por si acaso.
+    "calculadora": ["CalculatorApp.exe", "calc.exe"],
+    "calculator": ["CalculatorApp.exe", "calc.exe"],
+    "calc": ["CalculatorApp.exe", "calc.exe"],
+    "explorador": "explorer.exe",
+    "explorer": "explorer.exe",
+    "vscode": "Code.exe",
+    "code": "Code.exe",
+    "visual studio code": "Code.exe",
+    "terminal": "WindowsTerminal.exe",
+}
+
+
 def abrir_app(nombre: str) -> str:
-    """Abre una aplicación por nombre en Windows.
+    """Abre una aplicación de Windows desde WSL (vía interop con cmd.exe).
+
+    FRIDAY corre en WSL/Linux; las apps viven en Windows. Esta acción cruza el
+    puente con `cmd.exe /c start`. Resuelve alias comunes (ej. "spotify" → la URI
+    spotify:) y, si no conoce el nombre, intenta abrirlo tal cual (PATH/App Paths).
 
     Args:
-        nombre: Nombre del ejecutable o app (ej. "notepad", "calculator", "explorer").
+        nombre: Nombre o alias de la app (ej. "spotify", "chrome", "notepad").
 
     Returns:
-        Mensaje confirmando la apertura.
+        Mensaje honesto: confirma si abrió, o explica por qué no pudo.
     """
+    clean = (nombre or "").strip()
+    if not clean:
+        return "No me dijiste qué app abrir."
+
+    target = _WINDOWS_APP_TARGETS.get(clean.lower(), clean)
+    is_known = target in _WINDOWS_APP_TARGETS.values()
+    if not is_known and _UNSAFE_CHARS & set(target):
+        return f"Nombre de app no válido: '{nombre}'"
+
     try:
-        subprocess.Popen(nombre, shell=True)
-        return f"Aplicación '{nombre}' abierta"
-    except Exception as exc:
-        return f"No pude abrir '{nombre}': {exc}"
+        # argv como lista (sin shell=True) → el target no se interpola en un shell.
+        # errors="replace": cmd.exe escribe en la codepage OEM de Windows (no UTF-8);
+        # sin esto, un acento en la salida (ej. warning de UNC) rompe el decode.
+        result = subprocess.run(
+            ["cmd.exe", "/c", "start", "", target],
+            capture_output=True, text=True, errors="replace", timeout=20,
+        )
+    except FileNotFoundError:
+        return "No encuentro cmd.exe — ¿el interop de WSL está deshabilitado?"
+    except subprocess.TimeoutExpired:
+        return f"Timeout abriendo '{nombre}'."
+
+    if result.returncode == 0:
+        return f"Listo, abrí '{nombre}' en Windows."
+    err = (result.stderr or result.stdout or "").strip()
+    return f"No pude abrir '{nombre}': {err or 'el comando falló'}"
+
+
+def cerrar_app(nombre: str) -> str:
+    """Cierra una aplicación de Windows desde WSL (vía interop con cmd.exe).
+
+    Usa `taskkill /IM <proceso>.exe` — mata por nombre de imagen. Resuelve
+    alias comunes (ej. "spotify" → Spotify.exe). Si no conoce el nombre,
+    intenta cerrarlo tal cual (asumiendo que es un .exe).
+
+    Algunos alias mapean a una LISTA de procesos (apps UWP: el launcher
+    se autocierra, el proceso real tiene otro nombre). Se prueba cada uno
+    hasta que uno mata algo.
+
+    Args:
+        nombre: Nombre o alias de la app (ej. "spotify", "chrome", "notepad").
+
+    Returns:
+        Mensaje honesto: confirma si cerró, o explica por qué no pudo.
+    """
+    clean = (nombre or "").strip()
+    if not clean:
+        return "No me dijiste qué app cerrar."
+
+    target = _WINDOWS_KILL_TARGETS.get(clean.lower())
+    if target is None:
+        # Fallback: asumir que es un .exe. Sanitizar anti-inyección.
+        candidate = clean.lower().removesuffix(".exe") + ".exe"
+        if _UNSAFE_CHARS & set(candidate):
+            return f"Nombre de app no válido: '{nombre}'"
+        target = candidate
+
+    # Normalizar a lista: un solo nombre o varios (UWP launcher vs app real).
+    proc_names = target if isinstance(target, list) else [target]
+
+    last_out = ""
+    for proc in proc_names:
+        try:
+            result = subprocess.run(
+                ["cmd.exe", "/c", "taskkill", "/IM", proc, "/F"],
+                capture_output=True, text=True, errors="replace", timeout=20,
+            )
+        except FileNotFoundError:
+            return "No encuentro cmd.exe — ¿el interop de WSL está deshabilitado?"
+        except subprocess.TimeoutExpired:
+            return f"Timeout cerrando '{nombre}'."
+
+        if result.returncode == 0:
+            return f"Listo, cerré '{nombre}' en Windows."
+
+        out = (result.stdout or result.stderr or "").strip().lower()
+        last_out = (result.stdout or result.stderr or "").strip()
+        # "no running task" / "not found" = este proc no está corriendo.
+        # Probar el siguiente de la lista (puede ser un UWP con otro nombre).
+        if "no running task" in out or "not found" in out:
+            continue
+        # Otro error (access denied, etc.) = error real, no reintentes.
+        return f"No pude cerrar '{nombre}': {last_out or 'el comando falló'}"
+
+    # Ningún proceso de la lista estaba corriendo.
+    return f"'{nombre}' no estaba abierta."
+
+
+# Esquemas permitidos para abrir_url. http/https → navegador; spotify: → app.
+# Cerramos la lista a propósito: nada de file:, javascript:, etc.
+_ALLOWED_URL_SCHEMES = ("http://", "https://", "spotify:")
+
+
+def abrir_url(url: str) -> str:
+    """Abre una URL en el navegador (o app) por defecto de Windows, desde WSL.
+
+    Usa PowerShell `Start-Process` en vez del bridge `cmd.exe start` por una razón
+    concreta: `cmd.exe` interpreta el `&` de los query params como separador de
+    comandos y PARTE la URL. `Start-Process` la recibe como un argumento entero.
+    Además respeta los handlers de protocolo de Windows: `http/https` abre el
+    navegador, `spotify:` abre la app de Spotify.
+
+    Args:
+        url: URL a abrir. Debe empezar con http://, https:// o spotify:.
+
+    Returns:
+        Mensaje honesto: confirma si abrió, o explica por qué no pudo.
+    """
+    clean = (url or "").strip()
+    if not clean:
+        return "No me dijiste qué URL abrir."
+    if not clean.lower().startswith(_ALLOWED_URL_SCHEMES):
+        return f"URL no válida (esperaba http/https/spotify): '{url}'"
+    # Saltos de línea → inyección en el -Command de PowerShell. Se rechazan.
+    if "\n" in clean or "\r" in clean:
+        return f"URL no válida: '{url}'"
+
+    # La URL viaja dentro de un string single-quoted de PowerShell. Una comilla
+    # simple literal se escapa duplicándola ('') — así no se puede romper el quote.
+    safe = clean.replace("'", "''")
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             f"Start-Process '{safe}'"],
+            capture_output=True, text=True, errors="replace", timeout=20,
+        )
+    except FileNotFoundError:
+        return "No encuentro powershell.exe — ¿el interop de WSL está deshabilitado?"
+    except subprocess.TimeoutExpired:
+        return f"Timeout abriendo '{url}'."
+
+    if result.returncode == 0:
+        return f"Listo, abrí '{clean}'."
+    err = (result.stderr or result.stdout or "").strip()
+    return f"No pude abrir '{url}': {err or 'el comando falló'}"
+
+
+def buscar_en_google(consulta: str) -> str:
+    """Abre una búsqueda de Google en el navegador por defecto.
+
+    Construye la URL de búsqueda codificando la consulta (quote_plus), así
+    cualquier caracter especial queda percent-encoded y no rompe nada.
+
+    Args:
+        consulta: Texto a buscar (ej. "clima Córdoba", "documentación FastAPI").
+
+    Returns:
+        Mensaje honesto: confirma la búsqueda o explica por qué no pudo.
+    """
+    clean = (consulta or "").strip()
+    if not clean:
+        return "No me dijiste qué buscar."
+    url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(clean)
+    result = abrir_url(url)
+    # abrir_url confirma con "Listo, ..." al abrir bien; si no, propaga el error.
+    return f"Buscando '{clean}' en Google." if result.startswith("Listo") else result
 
 
 def listar_procesos(top: int = 15) -> str:

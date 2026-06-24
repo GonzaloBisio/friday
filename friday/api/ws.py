@@ -57,6 +57,24 @@ class WebSocketBroadcast:
         """Emite cambio de estado de un servicio."""
         await self.send_json({"type": "service_state", "service": service, "status": status})
 
+    async def broadcast_proactive(
+        self, text: str, *, speak: bool, level: str, title: str, message: str = "",
+    ) -> None:
+        """Emite un mensaje proactivo para el cliente de voz (Pilar 1).
+
+        `text` es la línea hablada (persona, inglés); `speak` indica si además de
+        mostrar el toast hay que decirla en voz. El cliente Windows escucha estos
+        eventos en /ws/live y actúa: toast siempre, voz solo si speak=True.
+        """
+        await self.send_json({
+            "type": "proactive",
+            "text": text,
+            "speak": speak,
+            "level": level,
+            "title": title,
+            "message": message,
+        })
+
     @property
     def active_connections(self) -> int:
         return len(self._connections)

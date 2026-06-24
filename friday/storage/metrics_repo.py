@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime
 from typing import Sequence
 
@@ -10,10 +11,20 @@ from friday.models import MetricPoint
 
 
 class MetricsRepository:
-    """Acceso a la tabla `metrics` de SQLite."""
+    """Acceso a la tabla `metrics` de SQLite.
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    La conexión se comparte entre varios collectors que corren en threads
+    distintos (APScheduler). sqlite3 con ``check_same_thread=False`` permite
+    usar la conexión desde otros threads, pero **no es safe para uso
+    concurrente**: dos ``executemany``+``commit`` solapados revientan con
+    ``InterfaceError: bad parameter or other API misuse``. El lock serializa
+    el acceso (un thread a la vez sobre la conexión). En producción se pasa
+    un lock **compartido** entre todos los repos que usan la misma conexión.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock | None = None) -> None:
         self._conn = conn
+        self._lock = lock or threading.RLock()
 
     # ---- Escritura ----
 
@@ -24,23 +35,24 @@ class MetricsRepository:
         if not point.name:
             raise ValueError("MetricPoint.name no puede estar vacío")
 
-        cur = self._conn.execute(
-            """
-            INSERT INTO metrics (ts, source, service, name, value, unit, tags_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                point.timestamp.isoformat(),
-                point.source,
-                point.service,
-                point.name,
-                point.value,
-                point.unit,
-                point.tags_json(),
-            ),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO metrics (ts, source, service, name, value, unit, tags_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    point.timestamp.isoformat(),
+                    point.source,
+                    point.service,
+                    point.name,
+                    point.value,
+                    point.unit,
+                    point.tags_json(),
+                ),
+            )
+            self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def save_many(self, points: Sequence[MetricPoint]) -> int:
         """Inserta múltiples puntos en una sola transacción. Devuelve la cantidad insertada."""
@@ -56,15 +68,18 @@ class MetricsRepository:
             )
             for p in points
         ]
-        self._conn.executemany(
-            """
-            INSERT INTO metrics (ts, source, service, name, value, unit, tags_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        self._conn.commit()
-        return len(rows)
+        # Lock cubre executemany + commit juntos: si se suelta entre los dos,
+        # otro thread puede intercalar su escritura y corromper la conexión.
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO metrics (ts, source, service, name, value, unit, tags_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            self._conn.commit()
+            return len(rows)
 
     # ---- Lectura ----
 
@@ -101,20 +116,22 @@ class MetricsRepository:
         sql = f"SELECT ts, source, service, name, value, unit, tags_json FROM metrics WHERE {where} ORDER BY ts DESC LIMIT ?"
         params.append(limit)
 
-        rows = self._conn.execute(sql, params).fetchall()
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_point(r) for r in rows]
 
     def latest(self, source: str, name: str) -> MetricPoint | None:
         """Devuelve el punto más reciente para un source+name, o None."""
-        row = self._conn.execute(
-            """
-            SELECT ts, source, service, name, value, unit, tags_json
-            FROM metrics
-            WHERE source = ? AND name = ?
-            ORDER BY ts DESC LIMIT 1
-            """,
-            (source, name),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT ts, source, service, name, value, unit, tags_json
+                FROM metrics
+                WHERE source = ? AND name = ?
+                ORDER BY ts DESC LIMIT 1
+                """,
+                (source, name),
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_point(row)

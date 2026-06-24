@@ -49,14 +49,28 @@ class TestGeminiUsageCollector:
         assert names == {"requests", "tokens_in", "tokens_out", "cost_usd"}
         assert all(p.source == "gemini" for p in points)
 
-    def test_cost_calculation(self, tracker, collector):
-        """Verifica que el costo se calcule con los precios de config."""
-        tracker.record(tokens_in=1000, tokens_out=1000)
+    def test_cost_calculation_unknown_model_uses_scalar_fallback(self, tracker, collector):
+        """Sin modelo, cae al escalar de config (robusto al valor real del .env)."""
+        from friday.config import settings
+
+        tracker.record(tokens_in=1000, tokens_out=1000)  # sin modelo → "unknown"
         points = collector.collect()
         cost = next(p for p in points if p.name == "cost_usd")
-        # 1K tokens_in * 0.00125 + 1K tokens_out * 0.005 = 0.00625
-        assert cost.value == pytest.approx(0.00625, rel=1e-4)
+        expected = (
+            settings.gemini_cost_per_1k_input_tokens
+            + settings.gemini_cost_per_1k_output_tokens
+        )
+        assert cost.value == pytest.approx(expected, rel=1e-4)
         assert cost.unit == "usd"
+
+    def test_cost_calculation_per_model_uses_pricing_table(self, tracker, collector):
+        """Con modelo conocido, aplica la tabla por modelo (no el escalar)."""
+        tracker.record(tokens_in=1000, tokens_out=1000, model="gemini-2.0-flash")
+        tracker.record(tokens_in=1000, tokens_out=1000, model="gemini-2.5-pro")
+        points = collector.collect()
+        cost = next(p for p in points if p.name == "cost_usd")
+        # 2.0-flash: 0.0001 + 0.0004 = 0.0005 ; 2.5-pro: 0.00125 + 0.01 = 0.01125
+        assert cost.value == pytest.approx(0.0005 + 0.01125, rel=1e-4)
 
     def test_collect_resets_counters(self, tracker, collector):
         """Después de collect(), los contadores del tracker quedan en cero."""

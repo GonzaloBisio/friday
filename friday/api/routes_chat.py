@@ -3,6 +3,7 @@
 POST /api/chat       — enviar mensaje (con modelo auto/flash/pro).
 GET  /api/chat/sessions — listar sesiones.
 POST /api/chat/sessions/switch — cambiar de sesión.
+GET  /api/chat/sessions/{id} — mensajes de una sesión.
 """
 
 from __future__ import annotations
@@ -102,4 +103,30 @@ def switch_session(request: Request, body: SwitchSessionRequest) -> dict:
         "status": "ok",
         "session_id": body.session_id,
         "message_count": len(brain.history),
+    }
+
+
+@router.get("/chat/sessions/{session_id}")
+def get_session_messages(request: Request, session_id: str) -> dict:
+    """Devuelve los mensajes de una sesión."""
+    brain = request.app.state.friday.brain
+    if brain is None or brain._chat_repo is None:
+        return {"session_id": session_id, "messages": [], "error": "Brain no disponible"}
+
+    messages = brain._chat_repo.load_session(session_id)
+    return {
+        "session_id": session_id,
+        "message_count": len(messages),
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "model": m.model,
+                "tokens_in": m.tokens_in,
+                "tokens_out": m.tokens_out,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ],
     }

@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+from friday.core.activity import activity_log
 
 router = APIRouter(tags=["agent"])
 
@@ -46,6 +49,16 @@ def list_tools(request: Request) -> list[dict]:
         }
         for a in catalog
     ]
+
+
+# ── GET /api/agent/activity ──────────────────────────────────────────────
+# Feed de transparencia: qué tools ejecutó FRIDAY en vivo (running → ok/error).
+# Lo consume el dashboard para mostrar la actividad y delatar alucinaciones.
+
+@router.get("/activity")
+def agent_activity(n: int = Query(default=30, ge=1, le=100)) -> JSONResponse:
+    """Últimos N eventos de ejecución de tools (transparencia en vivo)."""
+    return JSONResponse({"events": activity_log.recent(n)})
 
 
 # ── POST /api/agent/run ──────────────────────────────────────────────────

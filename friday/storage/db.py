@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _CREATE_METRICS = """
 CREATE TABLE IF NOT EXISTS metrics (
@@ -75,6 +75,20 @@ CREATE INDEX IF NOT EXISTS idx_notifications_created
 ON notifications (created_at DESC);
 """
 
+# Memoria de FRIDAY: hechos/preferencias que recuerda de Gonzalo. Lo que "aprende"
+# vive acá (no se reentrena el modelo) → inspeccionable y borrable. key UNIQUE para
+# poder hacer upsert (una preferencia que evoluciona).
+_CREATE_MEMORIES = """
+CREATE TABLE IF NOT EXISTS memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL DEFAULT 'fact' CHECK(kind IN ('fact', 'preference')),
+    key        TEXT NOT NULL UNIQUE,
+    value      TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 
 def get_connection(db_path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Abre (o crea) la DB y aplica migraciones pendientes.
@@ -122,5 +136,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
             (str(3),),
+        )
+        conn.commit()
+
+    if current < 4:
+        conn.execute(_CREATE_MEMORIES)
+        conn.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
+            (str(4),),
         )
         conn.commit()

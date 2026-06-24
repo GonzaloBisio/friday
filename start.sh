@@ -28,8 +28,9 @@ source venv/bin/activate
 
 echo "[$(date)] Iniciando FRIDAY..." >> "$LOGFILE"
 
-# Lanza en background y guarda el PID
-nohup python -m friday.app --dashboard --port 8510 >> "$LOGFILE" 2>&1 &
+# Lanza API + dashboard en background
+# (La voz Jarvis corre LOCAL en Windows con Pocket TTS — no hay servicio TTS acá.)
+nohup python -m friday.app --api-port 8000 --dashboard-port 8510 >> "$LOGFILE" 2>&1 &
 echo $! > "$PIDFILE"
 
 echo "[$(date)] FRIDAY iniciado con PID $(cat $PIDFILE)" >> "$LOGFILE"

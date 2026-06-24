@@ -23,25 +23,36 @@ class GeminiTracker:
         self._requests: int = 0
         self._tokens_in: int = 0
         self._tokens_out: int = 0
+        # Desglose por modelo para aplicar pricing por modelo en el collector.
+        self._by_model: dict[str, dict[str, int]] = {}
 
-    def record(self, tokens_in: int, tokens_out: int) -> None:
-        """Registra una llamada al SDK de Gemini."""
+    def record(self, tokens_in: int, tokens_out: int, model: str = "") -> None:
+        """Registra una llamada al SDK de Gemini, atribuida a un modelo."""
         with self._lock:
             self._requests += 1
             self._tokens_in += tokens_in
             self._tokens_out += tokens_out
+            bucket = self._by_model.setdefault(
+                model or "unknown",
+                {"requests": 0, "tokens_in": 0, "tokens_out": 0},
+            )
+            bucket["requests"] += 1
+            bucket["tokens_in"] += tokens_in
+            bucket["tokens_out"] += tokens_out
 
-    def snapshot_and_reset(self) -> dict[str, int]:
-        """Devuelve los contadores acumulados y los resetea a cero (atómico)."""
+    def snapshot_and_reset(self) -> dict:
+        """Devuelve los contadores acumulados (con desglose por modelo) y resetea."""
         with self._lock:
             data = {
                 "requests": self._requests,
                 "tokens_in": self._tokens_in,
                 "tokens_out": self._tokens_out,
+                "by_model": self._by_model,
             }
             self._requests = 0
             self._tokens_in = 0
             self._tokens_out = 0
+            self._by_model = {}
             return data
 
     @property
@@ -53,6 +64,30 @@ class GeminiTracker:
                 "tokens_in": self._tokens_in,
                 "tokens_out": self._tokens_out,
             }
+
+
+def _cost_from_snapshot(snap: dict) -> float:
+    """Costo total USD aplicando el precio de cada modelo del desglose.
+
+    Modelos fuera de `settings.gemini_pricing` caen al escalar de config. Si no
+    hay desglose (registros viejos sin modelo), usa el agregado con el escalar.
+    """
+    by_model = snap.get("by_model") or {}
+    if not by_model:
+        return (
+            (snap.get("tokens_in", 0) / 1000) * settings.gemini_cost_per_1k_input_tokens
+            + (snap.get("tokens_out", 0) / 1000) * settings.gemini_cost_per_1k_output_tokens
+        )
+    fallback = {
+        "in": settings.gemini_cost_per_1k_input_tokens,
+        "out": settings.gemini_cost_per_1k_output_tokens,
+    }
+    total = 0.0
+    for model, c in by_model.items():
+        price = settings.gemini_pricing.get(model, fallback)
+        total += (c["tokens_in"] / 1000) * price["in"]
+        total += (c["tokens_out"] / 1000) * price["out"]
+    return total
 
 
 # Singleton global — importar y usar desde cualquier módulo
@@ -77,9 +112,7 @@ class GeminiUsageCollector(Collector):
         snap = self._tracker.snapshot_and_reset()
         now = MetricPoint.utcnow()
 
-        cost_in = (snap["tokens_in"] / 1000) * settings.gemini_cost_per_1k_input_tokens
-        cost_out = (snap["tokens_out"] / 1000) * settings.gemini_cost_per_1k_output_tokens
-        cost_total = cost_in + cost_out
+        cost_total = _cost_from_snapshot(snap)
 
         return [
             MetricPoint(

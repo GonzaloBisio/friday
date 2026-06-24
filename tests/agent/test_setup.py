@@ -33,50 +33,48 @@ class TestBuildActionRegistry:
 
 
 class TestRegisterAgentTools:
-    def test_registers_tools_in_registry(self, wired):
+    def test_registers_each_action_as_first_class_tool(self, wired):
+        # Aplanado: cada acción es su propia tool (ya no hay ejecutar_accion_pc).
         tools_reg, _ = wired
-        assert "ejecutar_accion_pc" in tools_reg
-        assert "listar_acciones_disponibles" in tools_reg
+        assert "ejecutar_accion_pc" not in tools_reg
+        for name in ("abrir_app", "cerrar_app", "registrar_gasto", "reproducir_spotify"):
+            assert name in tools_reg
 
-    def test_listar_acciones_returns_catalog(self, wired):
+    def test_flat_tool_exposes_real_signature(self, wired):
+        # El schema que ve el LLM tiene la firma real (nombre), no accion/argumentos.
+        from friday.core.tool_schema import function_to_tool_schema
         tools_reg, _ = wired
-        result = tools_reg.execute("listar_acciones_disponibles", {})
-        data = json.loads(result)
-        names = {a["name"] for a in data}
-        assert "abrir_app" in names
-        assert "listar_procesos" in names
+        schema = function_to_tool_schema(tools_reg.get("abrir_app"))
+        props = schema["function"]["parameters"]["properties"]
+        assert "nombre" in props
+        assert "argumentos" not in props
+        assert schema["function"]["name"] == "abrir_app"
 
-    def test_ejecutar_low_risk_runs(self, wired):
+    def test_low_risk_runs_and_returns_bare_result(self, wired):
+        # LOW ejecuta y devuelve el resultado PELADO (texto), no un wrapper JSON.
         tools_reg, _ = wired
-        result = tools_reg.execute("ejecutar_accion_pc", {
-            "accion": "info_sistema",
-            "argumentos": "{}",
-        })
-        data = json.loads(result)
-        assert data["status"] == "ok"
+        result = tools_reg.execute("info_sistema", {})
+        assert "CPU" in result
+        assert "status" not in result  # no viene envuelto en {"status": "ok", ...}
 
-    def test_ejecutar_medium_risk_pends(self, wired):
-        tools_reg, _ = wired
-        result = tools_reg.execute("ejecutar_accion_pc", {
-            "accion": "abrir_app",
-            "argumentos": '{"nombre": "notepad"}',
-        })
+    def test_medium_risk_pends(self):
+        from friday.agent.registry import ActionRegistry, RiskLevel
+        action_reg = ActionRegistry()
+        action_reg.register("dummy_medium", "test", RiskLevel.MEDIUM, lambda: "done", tags=("test",))
+        gate = PermissionGate(action_reg)
+        tools_reg = ToolsRegistry()
+        register_agent_tools(tools_reg, gate)
+        result = tools_reg.execute("dummy_medium", {})
         data = json.loads(result)
         assert data["status"] == "pending_confirmation"
 
-    def test_ejecutar_unknown_rejected(self, wired):
+    def test_passes_args_through_gate(self, wired):
+        # registrar_gasto sin categoría → pregunta, sin tocar la planilla (no red).
         tools_reg, _ = wired
-        result = tools_reg.execute("ejecutar_accion_pc", {
-            "accion": "format_c",
-        })
-        data = json.loads(result)
-        assert data["status"] == "rejected"
+        result = tools_reg.execute("registrar_gasto", {"texto": "gasté 10 mil"})
+        assert "categoría" in result.lower()
 
-    def test_ejecutar_bad_json_returns_error(self, wired):
-        tools_reg, _ = wired
-        result = tools_reg.execute("ejecutar_accion_pc", {
-            "accion": "info_sistema",
-            "argumentos": "not json{",
-        })
-        data = json.loads(result)
-        assert data["status"] == "error"
+    def test_abrir_app_is_low_risk_now(self):
+        from friday.agent.registry import RiskLevel
+        spec = build_action_registry().get("abrir_app")
+        assert spec.risk == RiskLevel.LOW

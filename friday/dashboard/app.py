@@ -12,8 +12,10 @@ import streamlit.components.v1 as stc
 
 from friday.dashboard.components import (
     friday_orb_html,
+    live_mic_visualizer_html,
     scanning_line_css,
-    talk_bar_html,
+    tool_activity_html,
+    voice_log_html,
     voice_waveform_html,
 )
 
@@ -242,6 +244,25 @@ def _series(src: str, name: str, hours: int = 1):
     return [p.timestamp for p in pts], [p.value for p in pts]
 
 
+def _services_status(source: str):
+    """Último estado por servicio de un source: [(servicio, health, cpu, mem)]."""
+    start = now - timedelta(minutes=15)
+    pts = repo.query(source=source, start=start, limit=5000)
+    by: dict[str, dict] = {}
+    for p in pts:  # orden desc → primero por (service,name) es el más reciente
+        svc = p.service or "unknown"
+        by.setdefault(svc, {}).setdefault(p.name, p)
+    out = []
+    for svc in sorted(by):
+        m = by[svc]
+        sp = m.get("status")
+        health = (sp.tags or {}).get("health", "UNKNOWN") if sp else "UNKNOWN"
+        cpu_v = m["cpu_percent"].value if "cpu_percent" in m else None
+        mem_v = m["mem_percent"].value if "mem_percent" in m else None
+        out.append((svc, health, cpu_v, mem_v))
+    return out
+
+
 def _sys_status(cpu, ram, disk):
     vals = [v for v in (cpu, ram, disk) if v is not None]
     if not vals:
@@ -273,6 +294,48 @@ gem_tin = _latest("gemini", "tokens_in")
 gem_tout = _latest("gemini", "tokens_out")
 gem_cost = _latest("gemini", "cost_usd")
 
+_HEALTHY = {"UP", "healthy"}
+nx_services = _services_status("nexcourt")
+nx_up = len(nx_services) > 0
+nx_healthy = sum(1 for _, h, _, _ in nx_services if h in _HEALTHY)
+
+ax_services = _services_status("axis")
+ax_up = len(ax_services) > 0
+ax_healthy = sum(1 for _, h, _, _ in ax_services if h in _HEALTHY)
+
+
+# ── Estado real de subsistemas (brain / API / provider) ──────────────────────
+
+import httpx  # noqa: E402
+
+from friday.config import settings  # noqa: E402
+
+_API_BASE = "http://127.0.0.1:8000/api"
+
+
+@st.cache_data(ttl=4, show_spinner=False)
+def _ollama_alive() -> bool:
+    try:
+        url = f"{settings.ollama_host.rstrip('/')}/api/tags"
+        return httpx.get(url, timeout=1.0).status_code == 200
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=4, show_spinner=False)
+def _api_alive() -> bool:
+    try:
+        return httpx.get(f"{_API_BASE}/status", timeout=1.5).status_code == 200
+    except Exception:
+        return False
+
+
+_provider = (settings.llm_provider or "ollama").lower()
+_ollama_up = _ollama_alive()
+_gem_ok = bool(settings.gemini_api_key)
+_brain_up = _ollama_up if _provider == "ollama" else _gem_ok
+_api_up = _api_alive()
+
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
@@ -290,14 +353,28 @@ with st.sidebar:
 
     st.markdown("---")
 
-    for icon, label in [("🏠","Command Center"),("🧠","AI Core"),("📊","Métricas"),
-                        ("🔧","Sistema"),("💰","Costos"),("🏗️","NEXCOURT"),("⚡","Acciones"),("📋","Tasks")]:
-        st.markdown(f'<div class="ov-item" style="cursor:pointer"><span style="font-size:16px">{icon}</span>'
-                    f'<span class="ov-label">{label}</span></div>', unsafe_allow_html=True)
+    # Status vivo (no links de navegación falsos)
+    _brain_txt = (f"{settings.ollama_model}" if _provider == "ollama"
+                  else "Gemini") + (" · online" if _brain_up else " · offline")
+    _live = [
+        ("🧠", "AI Brain", _brain_txt, "#00ff88" if _brain_up else "#ff5555"),
+        ("🌐", "API REST", "online" if _api_up else "offline",
+         "#00ff88" if _api_up else "#ff5555"),
+        ("🏗️", "NEXCOURT", f"{nx_healthy}/{len(nx_services)} UP" if nx_up else "sin datos",
+         "#00ff88" if nx_up and nx_healthy == len(nx_services) else "#ff8c00" if nx_up else "#7a8ba0"),
+        ("🖥️", "AXIS", f"{ax_healthy}/{len(ax_services)} UP" if ax_up else "sin datos",
+         "#00ff88" if ax_up and ax_healthy == len(ax_services) else "#ff8c00" if ax_up else "#7a8ba0"),
+    ]
+    for icon, label, val, col in _live:
+        st.markdown(f"""<div class="ov-item">
+            <span style="font-size:15px">{icon}</span>
+            <div><div class="ov-label" style="font-size:12px;">{label}</div>
+            <div style="font-family:'Share Tech Mono',monospace;font-size:10px;color:{col};">{val}</div></div>
+        </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # Voice status
+    # Voice status — waveform decorativo compacto (el visualizer real va abajo).
     st.markdown("""
     <div class="fc" style="padding:14px;">
         <div class="fc-title">Voice Status</div>
@@ -306,8 +383,8 @@ with st.sidebar:
     stc.html(voice_waveform_html(50, 35), height=60)
     st.markdown("""
     <div style="text-align:center;margin-top:-4px;">
-        <div style="font-family:'Share Tech Mono',monospace;font-size:11px;color:#00d4ff;
-                    animation:pulse-d 2s ease-in-out infinite;">Listening...</div>
+        <div style="font-family:'Share Tech Mono',monospace;font-size:10px;color:#7a8ba0;">
+            mic en vivo + estado en Voice ↓</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -368,12 +445,12 @@ with c_ov:
     st.markdown('<div class="fc-title">AI Core Overview</div>', unsafe_allow_html=True)
 
     subsystems = [
-        ("🧠", "AI Core (Gemini)", gem_req is not None),
-        ("💾", "Memory / Storage", True),
+        ("🧠", f"AI Brain ({_provider})", _brain_up),
+        ("🌐", "API REST", _api_up),
         ("📡", "Collectors", cpu is not None),
-        ("🏗️", "NEXCOURT", False),
-        ("📊", "Dashboard", True),
-        ("🔧", "System", cpu is not None),
+        ("🏗️", "NEXCOURT", nx_up),
+        ("🖥️", "AXIS", ax_up),
+        ("💾", "Storage (SQLite)", True),
     ]
     for icon, name, on in subsystems:
         col = "#00ff88" if on else "#ff8c00"
@@ -406,7 +483,11 @@ with c_feed:
         feed.append(("💰", f"Gemini: ${gem_cost:.4f}", "Last cycle cost", True))
     if not feed:
         feed.append(("⏳", "Waiting for data...", "Start collectors", False))
-    feed.append(("🏗️", "NEXCOURT not linked", "Configure .env to enable", False))
+    if nx_up:
+        feed.append(("🏗️", f"NEXCOURT: {nx_healthy}/{len(nx_services)} UP",
+                     "ECS · CloudWatch", nx_healthy == len(nx_services)))
+    else:
+        feed.append(("🏗️", "NEXCOURT not linked", "Configure .env to enable", False))
 
     for icon, text, sub, live in feed[:6]:
         lc = "fi-live" if live else ""
@@ -427,11 +508,12 @@ with c_agents:
     st.markdown('<div class="fc-title">Active Subsystems</div>', unsafe_allow_html=True)
 
     agents = [
+        ("🧠", "AI Brain", _brain_up),
         ("📡", "System Collector", cpu is not None),
-        ("💰", "Gemini Tracker", True),
-        ("🏗️", "NEXCOURT Collector", False),
-        ("📊", "Dashboard Server", True),
-        ("🧠", "AI Brain", False),
+        ("🏗️", "NEXCOURT", nx_up),
+        ("🖥️", "AXIS", ax_up),
+        ("💰", "Gemini Tracker", _gem_ok),
+        ("🌐", "API REST", _api_up),
     ]
 
     cols_html = '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'
@@ -481,11 +563,19 @@ with c_qc:
     st.markdown('<div class="fc friday-card-animated">', unsafe_allow_html=True)
     st.markdown('<div class="fc-title">Quick Commands</div>', unsafe_allow_html=True)
 
-    for icon, label in [("➕","Start New Task"),("📊","View Metrics"),("🔄","Refresh Data"),
-                        ("🧠","Ask FRIDAY"),("▶️","Run Workflow")]:
-        st.markdown(f"""<div class="qc-btn">
-            <span class="qc-icon">{icon}</span><span>{label}</span>
-        </div>""", unsafe_allow_html=True)
+    # Botones reales: encolan una pregunta al chat de FRIDAY (más abajo).
+    _quick = [
+        ("🏗️ Estado NEXCOURT", "¿Cómo están los servicios de NEXCOURT ahora mismo?"),
+        ("🖥️ Estado AXIS", "¿Cómo están los containers de AXIS?"),
+        ("🚨 Errores recientes", "¿Hay errores recientes en algún servicio?"),
+        ("💰 Resumen de costos", "Dame el resumen de costos de Gemini de hoy."),
+    ]
+    for label, question in _quick:
+        if st.button(label, key=f"qc_{label}", use_container_width=True):
+            st.session_state.pending_prompt = question
+            st.rerun()
+    if st.button("🔄 Refrescar datos", key="qc_refresh", use_container_width=True):
+        st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -568,11 +658,22 @@ with c_llm:
     st.markdown('<div class="fc friday-card-animated">', unsafe_allow_html=True)
     st.markdown('<div class="fc-title">LLM Status</div>', unsafe_allow_html=True)
 
-    providers = [
-        ("🟢", "Gemini", "Connected", "#00ff88"),
-        ("⚪", "Claude Code", "Not Linked", "#7a8ba0"),
-        ("⚪", "NEXCOURT API", "Not Linked", "#7a8ba0"),
-    ]
+    if _provider == "ollama":
+        providers = [
+            ("🟢" if _ollama_up else "🔴", f"Ollama · {settings.ollama_model}",
+             "Connected (local)" if _ollama_up else "Offline",
+             "#00ff88" if _ollama_up else "#ff5555"),
+            ("🟢" if _gem_ok else "⚪", "Gemini",
+             "Available" if _gem_ok else "Not configured", "#7a8ba0"),
+        ]
+    else:
+        providers = [
+            ("🟢" if _gem_ok else "⚪", "Gemini",
+             "Connected" if _gem_ok else "No key",
+             "#00ff88" if _gem_ok else "#7a8ba0"),
+            ("🟢" if _ollama_up else "⚪", "Ollama (local)",
+             "Available" if _ollama_up else "Offline", "#7a8ba0"),
+        ]
     for icon, name, status, color in providers:
         st.markdown(f"""<div class="ov-item">
             <span style="font-size:13px;">{icon}</span>
@@ -583,16 +684,176 @@ with c_llm:
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── Bottom: TALK TO FRIDAY ──────────────────────────────────────────────────
+# ── Paneles de sistemas (NEXCOURT · AXIS) ────────────────────────────────────
+
+def _system_panel(title, services, healthy, up, hint):
+    st.markdown('<div class="fc friday-card-animated">', unsafe_allow_html=True)
+    total = len(services)
+    badge = (f'<span class="s-badge s-ok">{healthy}/{total} UP</span>'
+             if up and healthy == total
+             else f'<span class="s-badge s-warn">{healthy}/{total} UP</span>'
+             if up else '<span class="s-badge s-crit">offline</span>')
+    st.markdown(f'<div class="fc-title">{title} {badge}</div>', unsafe_allow_html=True)
+
+    if up:
+        grid = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">'
+        for svc, health, cpu_v, mem_v in services:
+            ok = health in _HEALTHY
+            bg = "rgba(0,255,136,0.04)" if ok else "rgba(255,58,58,0.04)"
+            bc = "rgba(0,255,136,0.15)" if ok else "rgba(255,58,58,0.2)"
+            dc = "dot-g" if ok else "dot-r"
+            sc = "#00ff88" if ok else "#ff5555"
+            cpu_s = f"{cpu_v:.1f}%" if cpu_v is not None else "—"
+            mem_s = f"{mem_v:.1f}%" if mem_v is not None else "—"
+            name = svc.replace("-service", "").replace("axis-", "")
+            grid += f"""<div style="background:{bg};border:1px solid {bc};border-radius:10px;padding:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                    <span style="font-family:'Exo 2',sans-serif;font-weight:600;font-size:13px;color:#fff;">{name}</span>
+                    <span class="dot {dc}" style="width:7px;height:7px;"></span>
+                </div>
+                <div style="display:flex;gap:14px;margin-top:8px;font-family:'Share Tech Mono',monospace;font-size:11px;">
+                    <span style="color:#7a8ba0;">CPU <span style="color:{sc};">{cpu_s}</span></span>
+                    <span style="color:#7a8ba0;">MEM <span style="color:{sc};">{mem_s}</span></span>
+                </div>
+            </div>"""
+        grid += '</div>'
+        st.markdown(grid, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""<div style="text-align:center;padding:30px 0;color:#7a8ba0;font-family:'Exo 2',sans-serif;">
+            {hint}</div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+_system_panel("🏗️ NEXCOURT · AWS ECS", nx_services, nx_healthy, nx_up,
+              "NEXCOURT sin datos · activá <code>nexcourt_mode=cloudwatch</code> en .env")
+_system_panel("🖥️ AXIS · Docker (droplet)", ax_services, ax_healthy, ax_up,
+              "AXIS sin datos · activá <code>axis_enabled=true</code> en .env")
+
+
+# ── Live Voice + Tool Transparency ──────────────────────────────────────────
+# Todo HTML+JS puro: fetch cada 1s a la API, sin rerun de Streamlit.
+#  • Mic visualizer: barras que reaccionan a TU voz real (Web Audio del navegador).
+#  • Voice Activity: transcripción/respuestas del listener.
+#  • Tool Activity: qué tools ejecuta FRIDAY en vivo → delata alucinaciones.
 
 st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-stc.html(talk_bar_html(70), height=80)
+st.markdown("#### 🎙️ Live Voice")
+st.markdown(
+    '<div style="font-size:10px;color:#555;margin-bottom:6px;">'
+    'El micrófono reacciona a tu voz en tiempo real (permití el acceso al mic). '
+    'Estado y actividad se actualizan cada 1s.</div>',
+    unsafe_allow_html=True,
+)
+stc.html(live_mic_visualizer_html(150), height=210)
+
+v_left, v_right = st.columns(2)
+with v_left:
+    st.markdown('<div class="fc-title">🎤 Voice Activity</div>', unsafe_allow_html=True)
+    stc.html(voice_log_html(300), height=320)
+with v_right:
+    st.markdown(
+        '<div class="fc-title">🔧 Tool Activity '
+        '<span class="live-tag">LIVE</span></div>',
+        unsafe_allow_html=True,
+    )
+    stc.html(tool_activity_html(300), height=320)
+
+
+# ── Chat interactivo con FRIDAY (POST /api/chat) ─────────────────────────────
+
+st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+st.markdown("#### 💬 Hablá con FRIDAY")
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def _fetch_sessions() -> list[dict]:
+    try:
+        r = httpx.get(f"{_API_BASE}/chat/sessions", timeout=3)
+        return r.json() if r.status_code == 200 else []
+    except Exception:
+        return []
+
+
+def _fetch_messages(session_id: str) -> list[dict]:
+    try:
+        r = httpx.get(f"{_API_BASE}/chat/sessions/{session_id}", timeout=5)
+        return r.json().get("messages", []) if r.status_code == 200 else []
+    except Exception:
+        return []
+
+
+def _send_chat(message: str, model: str = "auto") -> str:
+    r = httpx.post(f"{_API_BASE}/chat",
+                   json={"message": message, "model": model}, timeout=180)
+    r.raise_for_status()
+    return r.json().get("response", "(sin respuesta)")
+
+
+_sessions = _fetch_sessions()
+
+# Sembrar la conversación activa (la más reciente) una vez por carga de página.
+if "chat_history" not in st.session_state:
+    if _sessions:
+        st.session_state.chat_history = [
+            (m["role"], m["content"]) for m in _fetch_messages(_sessions[0]["id"])
+        ]
+    else:
+        st.session_state.chat_history = []
+
+if not _brain_up:
+    st.warning("⚠️ El cerebro está offline (Ollama caído o sin API key). "
+               "Levantá FRIDAY para poder chatear.")
+elif not _api_up:
+    st.warning("⚠️ La API de FRIDAY no responde en :8000. ¿Está corriendo `friday.app`?")
+
+for _role, _content in st.session_state.chat_history[-20:]:
+    with st.chat_message("user" if _role == "user" else "assistant",
+                         avatar="🧑" if _role == "user" else "🤖"):
+        st.markdown(_content)
+
+# Selector de modelo solo con Gemini (en Ollama el modelo es fijo).
+_model = "auto"
+if _provider == "gemini":
+    _model = st.radio("Modelo", ["auto", "flash", "pro"], horizontal=True, key="chat_model")
+
+# El prompt viene del input o de un Quick Command encolado.
+_pending = st.session_state.pop("pending_prompt", None)
+_typed = st.chat_input("Preguntale por NEXCOURT, AXIS, costos, errores…",
+                       disabled=not (_brain_up and _api_up))
+_prompt = _typed or _pending
+
+if _prompt:
+    st.session_state.chat_history.append(("user", _prompt))
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("FRIDAY está pensando…"):
+            try:
+                _answer = _send_chat(_prompt, _model)
+            except Exception as exc:
+                _answer = f"⚠️ No pude contactar a FRIDAY: {exc}"
+    st.session_state.chat_history.append(("assistant", _answer))
+    st.rerun()
+
+with st.expander("📜 Historial de sesiones anteriores"):
+    if _sessions:
+        _labels = {
+            s["id"]: f"{s.get('title') or 'Chat'} — {str(s.get('created_at', ''))[:16].replace('T', ' ')}"
+            for s in _sessions
+        }
+        _sel = st.selectbox("Sesión", options=list(_labels.keys()),
+                            format_func=lambda x: _labels[x], key="hist_sel")
+        if _sel:
+            for m in _fetch_messages(_sel):
+                _who = "🧑 Vos" if m["role"] == "user" else "🤖 FRIDAY"
+                st.markdown(f"**{_who}:** {m['content']}")
+    else:
+        st.caption("Todavía no hay conversaciones.")
 
 
 # ── Auto-refresco ────────────────────────────────────────────────────────────
+# Relajado a 15s: las secciones críticas usan @st.fragment con su propio ritmo.
 
 try:
     from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=10_000, key="friday_refresh")
+    st_autorefresh(interval=15_000, key="friday_refresh")
 except ImportError:
     pass

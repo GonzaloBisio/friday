@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from friday.api.main import AppState, create_app
-from friday.core.notifier import Notifier, CPU_WARN, CPU_CRIT, GEMINI_COST_DAILY_WARN
+from friday.core.notifier import Notifier
 from friday.models import MetricPoint
 from friday.storage.db import get_connection
 from friday.storage.metrics_repo import MetricsRepository
@@ -114,6 +114,26 @@ class TestNotifierSystem:
         assert any("RAM" in t for t in titles)
 
 
+class TestNotifierThresholdsFromSettings:
+    """Los umbrales se leen de settings en runtime (no constantes de módulo):
+    el .env manda y un override cambia el comportamiento sin reimportar."""
+
+    def test_lowering_cpu_warn_triggers_at_lower_value(self, notifier, repo, monkeypatch):
+        from friday.config import settings
+
+        # 50% NO dispara con el default (warn=70). Bajamos el umbral a 40.
+        monkeypatch.setattr(settings, "notifier_cpu_warn", 40.0)
+        monkeypatch.setattr(settings, "notifier_cpu_crit", 90.0)
+        repo.save(MetricPoint(
+            timestamp=datetime.now(timezone.utc), source="system",
+            name="cpu_percent", value=50.0,
+        ))
+        notifs = notifier.run()
+        cpu = [n for n in notifs if "CPU" in n.title]
+        assert len(cpu) == 1
+        assert cpu[0].level == "warning"
+
+
 class TestNotifierGemini:
     def test_cost_below_threshold_no_notification(self, notifier, repo):
         now = datetime.now(timezone.utc)
@@ -124,7 +144,9 @@ class TestNotifierGemini:
 
     def test_cost_above_threshold_notification(self, notifier, repo):
         now = datetime.now(timezone.utc)
-        repo.save(MetricPoint(timestamp=now, source="gemini", name="cost_usd", value=1.50))
+        # warn=$2.00, crit=$3.50 (subidos al habilitar billing con tope mensual).
+        # $2.50 cruza warn pero no crit.
+        repo.save(MetricPoint(timestamp=now, source="gemini", name="cost_usd", value=2.50))
         notifs = notifier.run()
         cost_notifs = [n for n in notifs if "Costo" in n.title]
         assert len(cost_notifs) == 1

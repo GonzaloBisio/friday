@@ -9,6 +9,7 @@ build/
 
 # Virtual environments
 venv/
+tts_venv/
 .venv/
 env/
 
@@ -20,6 +21,22 @@ env/
 
 # Environment / secrets
 .env
+.env.local
+.spotify_token.json
+.google-service-account.json
+.ir_codes.json
+# Google service-account / OAuth keys (nunca commitear). Cubre el patrón
+# <proyecto>-<hex>.json que descarga GCP, y los nombres OAuth típicos.
+*service-account*.json
+*-service-account.json
+friday-*.json
+credentials.json
+token.json
+*.pem
+*.key
+
+# Windows / WSL: alternate data streams (basura que aparece en \\wsl$)
+*:Zone.Identifier
 
 # SQLite databases
 *.db
@@ -45,3 +62,11 @@ htmlcov/
 .claude/
 friday.db-shm
 friday.db-wal
+
+# Runtime (logs y pidfiles — se regeneran solos)
+*.log
+*.pid
+
+# Capa de conocimiento (digests de research auto-generados). Cuando empieces a
+# curar notas a mano y quieras versionarlas, sacá esta línea.
+knowledge/

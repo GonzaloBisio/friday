@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,10 +24,16 @@ class ChatMessage:
 
 
 class ChatRepository:
-    """Acceso a las tablas chat_sessions y chat_messages."""
+    """Acceso a las tablas chat_sessions y chat_messages.
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    El lock serializa el acceso a la conexión compartida (ver
+    MetricsRepository para el porqué). En producción se pasa un lock
+    compartido entre todos los repos de la misma conexión.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock | None = None) -> None:
         self._conn = conn
+        self._lock = lock or threading.RLock()
 
     # ── Sesiones ─────────────────────────────────────────────────────────
 
@@ -34,19 +41,21 @@ class ChatRepository:
         """Crea una nueva sesión y devuelve su ID."""
         session_id = uuid.uuid4().hex[:16]
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            "INSERT INTO chat_sessions (id, title, created_at) VALUES (?, ?, ?)",
-            (session_id, title, now),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO chat_sessions (id, title, created_at) VALUES (?, ?, ?)",
+                (session_id, title, now),
+            )
+            self._conn.commit()
         return session_id
 
     def list_sessions(self, limit: int = 20) -> list[dict]:
         """Lista sesiones recientes."""
-        rows = self._conn.execute(
-            "SELECT id, title, created_at FROM chat_sessions ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, title, created_at FROM chat_sessions ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [
             {"id": r[0], "title": r[1], "created_at": r[2]}
             for r in rows
@@ -56,18 +65,19 @@ class ChatRepository:
 
     def save_message(self, msg: ChatMessage) -> int:
         """Guarda un mensaje y devuelve su id."""
-        cur = self._conn.execute(
-            """INSERT INTO chat_messages
-               (session_id, role, content, model, tokens_in, tokens_out, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                msg.session_id, msg.role, msg.content,
-                msg.model, msg.tokens_in, msg.tokens_out,
-                msg.created_at.isoformat(),
-            ),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO chat_messages
+                   (session_id, role, content, model, tokens_in, tokens_out, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    msg.session_id, msg.role, msg.content,
+                    msg.model, msg.tokens_in, msg.tokens_out,
+                    msg.created_at.isoformat(),
+                ),
+            )
+            self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def save_messages(self, messages: Sequence[ChatMessage]) -> int:
         """Guarda múltiples mensajes en batch."""
@@ -76,33 +86,36 @@ class ChatRepository:
              m.tokens_in, m.tokens_out, m.created_at.isoformat())
             for m in messages
         ]
-        self._conn.executemany(
-            """INSERT INTO chat_messages
-               (session_id, role, content, model, tokens_in, tokens_out, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            rows,
-        )
-        self._conn.commit()
-        return len(rows)
+        with self._lock:
+            self._conn.executemany(
+                """INSERT INTO chat_messages
+                   (session_id, role, content, model, tokens_in, tokens_out, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            self._conn.commit()
+            return len(rows)
 
     def load_session(self, session_id: str, limit: int = 200) -> list[ChatMessage]:
         """Carga los mensajes de una sesión, ordenados por fecha."""
-        rows = self._conn.execute(
-            """SELECT id, session_id, role, content, model, tokens_in, tokens_out, created_at
-               FROM chat_messages
-               WHERE session_id = ?
-               ORDER BY created_at ASC
-               LIMIT ?""",
-            (session_id, limit),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, session_id, role, content, model, tokens_in, tokens_out, created_at
+                   FROM chat_messages
+                   WHERE session_id = ?
+                   ORDER BY created_at ASC
+                   LIMIT ?""",
+                (session_id, limit),
+            ).fetchall()
         return [self._row_to_msg(r) for r in rows]
 
     def count_messages(self, session_id: str) -> int:
         """Cantidad de mensajes en una sesión."""
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
         return row[0] if row else 0
 
     # ── Helpers ──────────────────────────────────────────────────────────

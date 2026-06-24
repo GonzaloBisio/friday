@@ -250,110 +250,6 @@ def voice_waveform_html(height: int = 60, bar_count: int = 40) -> str:
     """
 
 
-def talk_bar_html(height: int = 70) -> str:
-    """Barra inferior 'TALK TO FRIDAY' con waveform y micrófono animado."""
-    return f"""
-    <div style="width:100%;height:{height}px;background:linear-gradient(180deg,rgba(10,14,23,0.95),rgba(13,19,33,0.98));
-         border:1px solid rgba(0,212,255,0.2);border-radius:16px;display:flex;align-items:center;
-         justify-content:center;gap:20px;position:relative;overflow:hidden;">
-
-        <!-- Dot pattern left -->
-        <div style="display:flex;gap:4px;align-items:center;">
-            <svg width="150" height="8"><g id="dots-left"></g></svg>
-        </div>
-
-        <!-- Central voice area -->
-        <div style="display:flex;align-items:center;gap:16px;
-                    background:linear-gradient(90deg,transparent,rgba(0,212,255,0.08),transparent);
-                    padding:8px 30px;border-radius:30px;border:1px solid rgba(0,212,255,0.15);">
-
-            <!-- Waveform -->
-            <canvas id="talkWave" width="200" height="35" style="width:200px;height:35px;"></canvas>
-
-            <!-- Label -->
-            <div style="text-align:center;">
-                <div style="font-family:'Exo 2',sans-serif;font-weight:700;font-size:15px;
-                            letter-spacing:4px;color:#00d4ff;
-                            text-shadow:0 0 15px rgba(0,212,255,0.5);">
-                    TALK TO FRIDAY
-                </div>
-                <div style="font-family:'Share Tech Mono',monospace;font-size:10px;
-                            color:rgba(0,212,255,0.5);letter-spacing:2px;
-                            animation:blink-text 2s ease-in-out infinite;">
-                    I am listening...
-                </div>
-            </div>
-
-            <!-- Waveform right -->
-            <canvas id="talkWave2" width="200" height="35" style="width:200px;height:35px;"></canvas>
-        </div>
-
-        <!-- Dot pattern right -->
-        <div style="display:flex;gap:4px;align-items:center;">
-            <svg width="150" height="8"><g id="dots-right"></g></svg>
-        </div>
-    </div>
-
-    <style>
-    @keyframes blink-text {{
-        0%, 100% {{ opacity: 1; }}
-        50% {{ opacity: 0.3; }}
-    }}
-    </style>
-
-    <script>
-    (function() {{
-        // Dot patterns
-        ['dots-left','dots-right'].forEach(id => {{
-            const g = document.getElementById(id);
-            for (let i = 0; i < 25; i++) {{
-                const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
-                c.setAttribute('cx', 4 + i * 6);
-                c.setAttribute('cy', 4);
-                c.setAttribute('r', 2);
-                c.setAttribute('fill', 'rgba(0,212,255,' + (0.15 + Math.random()*0.25) + ')');
-                g.appendChild(c);
-            }}
-        }});
-
-        // Mini waveforms
-        ['talkWave','talkWave2'].forEach(canvasId => {{
-            const cv = document.getElementById(canvasId);
-            const ctx = cv.getContext('2d');
-            const bars = 30;
-            const phases = Array.from({{length:bars}}, ()=>Math.random()*Math.PI*2);
-            const speeds = Array.from({{length:bars}}, ()=>0.03+Math.random()*0.05);
-
-            function draw(t) {{
-                requestAnimationFrame(draw);
-                ctx.clearRect(0, 0, cv.width, cv.height);
-                const barW = cv.width / bars * 0.6;
-                const gap = cv.width / bars;
-                const cy = cv.height / 2;
-
-                for (let i = 0; i < bars; i++) {{
-                    phases[i] += speeds[i];
-                    const center = 1 - Math.abs(i-bars/2)/(bars/2)*0.6;
-                    const amp = (0.2 + Math.sin(phases[i])*0.3) * center * cy * 0.7;
-                    const h = Math.max(2, Math.abs(amp));
-                    const x = i*gap + gap*0.2;
-
-                    ctx.fillStyle = 'rgba(0,212,255,0.7)';
-                    ctx.shadowColor = 'rgba(0,212,255,0.4)';
-                    ctx.shadowBlur = 4;
-                    ctx.beginPath();
-                    ctx.roundRect(x, cy-h, barW, h*2, barW/2);
-                    ctx.fill();
-                }}
-                ctx.shadowBlur = 0;
-            }}
-            draw(0);
-        }});
-    }})();
-    </script>
-    """
-
-
 def scanning_line_css() -> str:
     """CSS para la línea de escaneo horizontal que se mueve por los paneles."""
     return """
@@ -391,4 +287,262 @@ def scanning_line_css() -> str:
     .fade-in-d4 { animation-delay: 0.4s; opacity: 0; }
     .fade-in-d5 { animation-delay: 0.5s; opacity: 0; }
     </style>
+    """
+
+
+def tool_activity_html(height: int = 280) -> str:
+    """Feed de transparencia: qué tools ejecuta FRIDAY en vivo (running → ok/error).
+
+    Hace fetch a /api/agent/activity cada 1s (mismo patrón que el log de voz, sin
+    rerun de Streamlit). Cada evento muestra un ícono por estado, así Gonzalo VE qué
+    hace FRIDAY — y si dice "listo" sin que aparezca un evento, queda en evidencia.
+    """
+    return f"""
+    <div id="act-container" style="width:100%;max-height:{height}px;overflow-y:auto;
+         font-family:'Share Tech Mono',monospace;font-size:11px;line-height:1.5;
+         padding:10px 12px;background:rgba(10,14,23,0.6);border-radius:8px;
+         border:1px solid rgba(0,212,255,0.12);">
+        <div id="act-lines" style="color:#7a8ba0;">(sin actividad de tools todavía…)</div>
+    </div>
+
+    <script>
+    (function() {{
+        const API = 'http://127.0.0.1:8000/api/agent/activity?n=20';
+        const el = document.getElementById('act-lines');
+        const ICON = {{ running: '⏳', ok: '✅', error: '❌' }};
+        const COL  = {{ running: '#ff8c00', ok: '#00ff88', error: '#ff3a3a' }};
+
+        function esc(s) {{ return (s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }}
+
+        function render(events) {{
+            if (!events || events.length === 0) {{
+                el.innerHTML = '<span style="color:#555;">(sin actividad de tools todavía…)</span>';
+                return;
+            }}
+            // Más recientes arriba.
+            el.innerHTML = events.slice().reverse().map(ev => {{
+                const ic = ICON[ev.status] || '•';
+                const col = COL[ev.status] || '#7a8ba0';
+                const detail = ev.detail ? ' <span style="color:#5b6b80;">— ' + esc(ev.detail) + '</span>' : '';
+                return '<div style="padding:3px 0;border-bottom:1px solid rgba(0,212,255,0.04);">' +
+                       '<span style="color:#445;">' + ev.ts + '</span> ' +
+                       '<span>' + ic + '</span> ' +
+                       '<span style="color:' + col + ';font-weight:bold;">' + esc(ev.tool) + '</span>' +
+                       detail + '</div>';
+            }}).join('');
+        }}
+
+        async function tick() {{
+            try {{
+                const r = await fetch(API);
+                const data = await r.json();
+                render(data.events);
+            }} catch(e) {{
+                el.innerHTML = '<span style="color:#ff3a3a;">API no disponible</span>';
+            }}
+        }}
+        tick();
+        setInterval(tick, 1000);
+    }})();
+    </script>
+    """
+
+
+def live_mic_visualizer_html(height: int = 140) -> str:
+    """Visualizador de voz EN VIVO estilo Wispr — barras que reaccionan a tu mic real.
+
+    Usa Web Audio (`getUserMedia` + AnalyserNode) sobre el micrófono del navegador.
+    Como el dashboard corre en localhost (contexto seguro), el browser deja usar el
+    mic y las barras reaccionan a TU voz de verdad. Si negás el permiso o no hay mic,
+    cae a una animación idle. Arriba muestra el estado real del listener (WAITING /
+    LISTENING / CONVERSING) leído de /api/voice/log.
+    """
+    return f"""
+    <div style="width:100%;background:rgba(10,14,23,0.55);border:1px solid rgba(0,212,255,0.14);
+         border-radius:12px;padding:12px 14px;box-sizing:border-box;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span id="mic-dot" style="width:9px;height:9px;border-radius:50%;display:inline-block;
+                      background:#7a8ba0;box-shadow:0 0 6px #7a8ba0;"></span>
+                <span id="mic-state" style="color:#7a8ba0;font-family:'Exo 2',sans-serif;
+                      font-weight:700;font-size:12px;letter-spacing:1.5px;">IDLE</span>
+            </div>
+            <span id="mic-hint" style="font-family:'Share Tech Mono',monospace;font-size:10px;color:#5b6b80;">
+                conectando micrófono…</span>
+        </div>
+        <canvas id="micCanvas" style="width:100%;height:{height}px;display:block;"></canvas>
+    </div>
+
+    <script>
+    (function() {{
+        const canvas = document.getElementById('micCanvas');
+        const ctx = canvas.getContext('2d');
+        const dot = document.getElementById('mic-dot');
+        const stateEl = document.getElementById('mic-state');
+        const hint = document.getElementById('mic-hint');
+        const BARS = 48;
+
+        const STATE = {{
+            idle:       {{ c:'#7a8ba0', t:'IDLE' }},
+            waiting:    {{ c:'#ff8c00', t:'WAITING — Say "FRIDAY"' }},
+            listening:  {{ c:'#00ff88', t:'LISTENING' }},
+            conversing: {{ c:'#00d4ff', t:'CONVERSING' }},
+        }};
+        let accent = '#00d4ff';
+
+        function resize() {{
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = canvas.clientWidth * dpr;
+            canvas.height = canvas.clientHeight * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }}
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Estado real del listener (polling al log de voz).
+        async function pollState() {{
+            try {{
+                const r = await fetch('http://127.0.0.1:8000/api/voice/log?n=5');
+                const d = await r.json();
+                const s = STATE[d.state] || STATE.idle;
+                accent = s.c;
+                stateEl.textContent = s.t; stateEl.style.color = s.c;
+                dot.style.background = s.c; dot.style.boxShadow = '0 0 6px ' + s.c;
+            }} catch(e) {{}}
+        }}
+        pollState();
+        setInterval(pollState, 1000);
+
+        // Mic real vía Web Audio. Fallback a animación idle si no hay permiso.
+        let analyser = null, freq = null, micOn = false;
+        const fallbackPhase = Array.from({{length: BARS}}, () => Math.random() * Math.PI * 2);
+
+        async function initMic() {{
+            try {{
+                const stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                const actx = new (window.AudioContext || window.webkitAudioContext)();
+                const src = actx.createMediaStreamSource(stream);
+                analyser = actx.createAnalyser();
+                analyser.fftSize = 128;
+                analyser.smoothingTimeConstant = 0.8;
+                src.connect(analyser);
+                freq = new Uint8Array(analyser.frequencyBinCount);
+                micOn = true;
+                hint.textContent = 'micrófono activo';
+            }} catch(e) {{
+                hint.textContent = 'sin micrófono (permiso denegado)';
+            }}
+        }}
+        initMic();
+
+        function draw(time) {{
+            requestAnimationFrame(draw);
+            const w = canvas.clientWidth, h = canvas.clientHeight, cy = h / 2;
+            ctx.clearRect(0, 0, w, h);
+            const gap = w / BARS, bw = gap * 0.55, t = time * 0.001;
+            if (micOn && analyser) analyser.getByteFrequencyData(freq);
+
+            for (let i = 0; i < BARS; i++) {{
+                let amp;
+                if (micOn && analyser) {{
+                    const v = freq[Math.floor(i / BARS * freq.length)] / 255;  // 0..1
+                    amp = Math.max(0.03, v) * h * 0.46;
+                }} else {{
+                    fallbackPhase[i] += 0.04;
+                    const center = 1 - Math.abs(i - BARS/2) / (BARS/2) * 0.6;
+                    amp = (0.05 + Math.abs(Math.sin(fallbackPhase[i] + t)) * 0.12) * center * h * 0.46;
+                }}
+                const bh = Math.max(3, amp);
+                const x = i * gap + (gap - bw) / 2;
+                const g = ctx.createLinearGradient(x, cy - bh, x, cy + bh);
+                g.addColorStop(0, accent);
+                g.addColorStop(0.5, 'rgba(0,255,200,0.85)');
+                g.addColorStop(1, accent);
+                ctx.fillStyle = g;
+                ctx.shadowColor = accent; ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.roundRect(x, cy - bh, bw, bh * 2, bw / 2);
+                ctx.fill();
+            }}
+            ctx.shadowBlur = 0;
+        }}
+        draw(0);
+    }})();
+    </script>
+    """
+
+
+def voice_log_html(height: int = 300) -> str:
+    """Sección de Voice Activity con fetch cada 1s al endpoint /api/voice/log.
+
+    Muestra estado (badge animado), transcripciones y respuestas en tiempo real
+    sin recargar la página de Streamlit.
+    """
+    return f"""
+    <div id="voice-log-container" style="width:100%;max-height:{height}px;overflow-y:auto;
+         font-family:'Share Tech Mono',monospace;font-size:11px;line-height:1.6;
+         padding:10px 12px;background:rgba(10,14,23,0.6);border-radius:8px;
+         border:1px solid rgba(0,212,255,0.12);">
+        <div id="voice-state-badge" style="margin-bottom:8px;display:flex;align-items:center;gap:8px;">
+            <span id="voice-dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;
+                  background:#7a8ba0;box-shadow:0 0 4px #7a8ba0;"></span>
+            <span id="voice-state-text" style="color:#7a8ba0;font-family:'Exo 2',sans-serif;
+                  font-weight:600;font-size:11px;letter-spacing:1px;">IDLE</span>
+        </div>
+        <div id="voice-lines" style="color:#7a8ba0;">(esperando actividad...)</div>
+    </div>
+
+    <script>
+    (function() {{
+        const API = 'http://127.0.0.1:8000/api/voice/log?n=25';
+        const linesEl = document.getElementById('voice-lines');
+        const stateText = document.getElementById('voice-state-text');
+        const stateDot = document.getElementById('voice-dot');
+
+        const STATE_STYLE = {{
+            idle:       {{ color: '#7a8ba0', bg: '#7a8ba0', text: 'IDLE' }},
+            waiting:    {{ color: '#ff8c00', bg: '#ff8c00', text: 'WAITING — Say "FRIDAY"' }},
+            listening:  {{ color: '#00ff88', bg: '#00ff88', text: 'LISTENING' }},
+            conversing: {{ color: '#00d4ff', bg: '#00d4ff', text: 'CONVERSING' }},
+            no_log:     {{ color: '#7a8ba0', bg: '#7a8ba0', text: 'NO LOG YET' }},
+            error:      {{ color: '#ff3a3a', bg: '#ff3a3a', text: 'ERROR' }},
+        }};
+
+        function updateState(state) {{
+            const s = STATE_STYLE[state] || STATE_STYLE.idle;
+            stateText.textContent = s.text;
+            stateText.style.color = s.color;
+            stateDot.style.background = s.bg;
+            stateDot.style.boxShadow = '0 0 6px ' + s.bg;
+        }}
+
+        function formatLines(lines) {{
+            if (!lines || lines.length === 0) return '<span style="color:#555;">(sin actividad)</span>';
+            return lines.map(ln => {{
+                let cls = 'color:#7a8ba0;';
+                if (ln.includes('WAKE WORD')) cls = 'color:#00ff88;font-weight:bold;';
+                else if (ln.includes('Vos:')) cls = 'color:#ff8c00;';
+                else if (ln.includes('FRIDAY:')) cls = 'color:#00d4ff;';
+                else if (ln.includes('[tiempos]')) cls = 'color:#555;font-size:10px;';
+                else if (ln.includes('conversacion')) cls = 'color:#7a8ba0;font-style:italic;';
+                return '<span style="' + cls + '">' + ln.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</span>';
+            }}).join('<br>');
+        }}
+
+        async function fetchLog() {{
+            try {{
+                const r = await fetch(API);
+                const data = await r.json();
+                updateState(data.state || 'idle');
+                linesEl.innerHTML = formatLines(data.lines);
+            }} catch(e) {{
+                updateState('error');
+                linesEl.innerHTML = '<span style="color:#ff3a3a;">API no disponible</span>';
+            }}
+        }}
+
+        fetchLog();
+        setInterval(fetchLog, 1000);
+    }})();
+    </script>
     """
