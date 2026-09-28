@@ -13,11 +13,11 @@
 voices/  (Vosk, Piper, jarvis.wav)        LaunchAgent com.friday.wake (al login)
    │                                                │
    ▼                                                ▼
-friday/voice/wake.py ── main():929 ─ Vosk grammar ["friday",…] ─► "friday" detectada
-   │  ├─ speak() saludo ─ _synthesize():391  Pocket TTS (Jarvis) → fallback Piper → afplay
+friday/voice/wake.py ── main():956 ─ Vosk grammar ["friday",…] ─► "friday" detectada
+   │  ├─ speak() saludo ─ _synthesize():418  Pocket TTS (Jarvis) → fallback Piper → afplay
    │  ├─ launch_friday() → start.sh (si :8000 no responde) → Ollama + friday.app
-   │  └─ conversation_loop → _run_conversation():748
-   │        ├─ _listen_turn():678   VAD por RMS, corta tras 1.3s de silencio
+   │  └─ conversation_loop → _run_conversation():775
+   │        ├─ _listen_turn():705   VAD por RMS, corta tras 1.3s de silencio
    │        ├─ _transcribe()        mlx-whisper large-v3-turbo (GPU) │ faster-whisper │ Vosk
    │        ├─ ask_friday() ── HTTP POST 127.0.0.1:8000/api/chat ──────────────┐
    │        └─ _play_with_interrupt()  el mic sigue escuchando → barge-in      │

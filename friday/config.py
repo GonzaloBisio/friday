@@ -239,6 +239,9 @@ class Settings(BaseSettings):
     # Carpeta con modelos de voz (Vosk, Piper, jarvis.wav) y el log del listener.
     # Vacío = default por plataforma (ver friday/voice/wake.py: _default_voices_dir).
     voices_dir: str = ""
+    # Voz del catálogo de Pocket TTS (sin login) si no hay voices/jarvis.wav para
+    # clonar. Escuchá las opciones en voices/samples/*.wav. Env: TTS_VOICE.
+    tts_voice: str = "charles"
 
     # --- System collector ---
     system_poll_interval_seconds: int = 10

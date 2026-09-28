@@ -9,7 +9,7 @@ En la PC vieja quedaron cosas que **no están en git** y hay que traer:
 
 | Qué | Dónde está (PC vieja) | Cómo viaja | Destino en la Mac |
 |---|---|---|---|
-| **`jarvis.wav`** (clip ~9s para clonar la voz) | `C:\Users\gonza\friday\voices\jarvis.wav` = `/mnt/c/Users/gonza/friday/voices/jarvis.wav` | **git** (excepción en `.gitignore`) | `~/friday/voices/jarvis.wav` |
+| **`jarvis.wav`** (opcional: clip ~9s para clonar la voz; sin él se usa `TTS_VOICE`) | `C:\Users\gonza\friday\voices\jarvis.wav` = `/mnt/c/Users/gonza/friday/voices/jarvis.wav` | **git** (excepción en `.gitignore`) | `~/friday/voices/jarvis.wav` |
 | **`.env`** (GEMINI_API_KEY, Spotify, NEXCOURT, etc.) | `~/dev/personal/friday/.env` (WSL) | **NUNCA git.** Gestor de contraseñas o copia manual de los valores | `~/friday/.env` |
 | Service account de Google Sheets (JSON) | ruta en `GOOGLE_SHEETS_CREDENTIALS` del `.env` | igual que `.env` | `~/friday/` + actualizar la ruta en `.env` |
 | `friday.db` (memorias, historial de chat, métricas) | `~/dev/personal/friday/friday.db` | opcional; igual que `.env` (datos personales) | `~/friday/friday.db` (con FRIDAY apagado) |
@@ -71,5 +71,5 @@ cd ~/friday && git pull                                  # trae jarvis.wav
 6. **Reiniciar el listener** para que tome la voz y la config:
    ```bash
    launchctl kickstart -k gui/$(id -u)/com.friday.wake
-   tail -f voices/friday-wake.log     # debe decir "Pocket TTS cargado (voz Jarvis clonada)"
+   tail -f voices/friday-wake.log     # debe decir "Pocket TTS cargado (voz clonada de jarvis.wav)"
    ```

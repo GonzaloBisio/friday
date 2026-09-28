@@ -51,9 +51,23 @@ VOICES_DIR = os.environ.get("FRIDAY_VOICES_DIR") or os.path.join(REPO_DIR, "voic
 PIPER_MODEL = os.path.join(VOICES_DIR, "en_US-ryan-high.onnx")
 VOSK_MODEL = os.path.join(VOICES_DIR, "vosk-model-small-en-us-0.15")
 LOG_FILE = os.path.join(VOICES_DIR, "friday-wake.log")
-# Sample de referencia para clonar la voz de Jarvis con Pocket TTS.
-# Generado desde el MP3 mejorado (Adobe Podcast) — clip limpio de ~9s.
+# Clip de referencia OPCIONAL para clonar una voz con Pocket TTS (~9s, limpio).
+# Clonar requiere los pesos gated de HuggingFace (aceptar términos + hf auth login).
 JARVIS_REF = os.path.join(VOICES_DIR, "jarvis.wav")
+# Voz del catálogo de Pocket TTS (sin login ni clonado) cuando no hay clip o el
+# clonado no está disponible. Muestras para elegir: voices/samples/*.wav.
+def _configured_voice():
+    """FRIDAY_TTS_VOICE (env) > TTS_VOICE del .env (friday.config) > 'charles'."""
+    if os.environ.get("FRIDAY_TTS_VOICE"):
+        return os.environ["FRIDAY_TTS_VOICE"]
+    try:
+        from friday.config import settings
+        return settings.tts_voice
+    except Exception:  # noqa: BLE001 — el listener no debe caerse por la config
+        return "charles"
+
+
+POCKET_VOICE = _configured_voice()
 
 
 # ── Wake word ──────────────────────────────────────────────────────
@@ -231,10 +245,11 @@ def get_greeting():
 
 
 def _load_pocket():
-    """Carga Pocket TTS + el estado de voz Jarvis UNA sola vez. None si falla.
+    """Carga Pocket TTS + el estado de voz UNA sola vez. None si falla (→ Piper).
 
-    El modelo (148MB) se baja la primera vez. get_state_for_audio_prompt procesa
-    el clip JARVIS_REF y devuelve el voice_state del clon, que se reusa siempre.
+    Orden: 1) clon desde JARVIS_REF si el clip existe y los pesos de clonado
+    están disponibles; 2) voz de catálogo POCKET_VOICE (sin login). El
+    voice_state se calcula una vez y se reusa en cada frase.
     """
     global _pocket, _pocket_voice
     if _pocket is not None:
@@ -243,10 +258,22 @@ def _load_pocket():
         from pocket_tts import TTSModel
         t0 = time.time()
         _pocket = TTSModel.load_model()
-        _pocket_voice = _pocket.get_state_for_audio_prompt(JARVIS_REF)
-        log(f"Pocket TTS cargado (voz Jarvis clonada) en {time.time() - t0:.1f}s.")
     except Exception as e:  # noqa: BLE001 — si falla, se usa Piper/Ryan
         log(f"No pude cargar Pocket TTS: {e!r} — usaré Piper/Ryan.")
+        _pocket = None
+        return None
+    if os.path.exists(JARVIS_REF):
+        try:
+            _pocket_voice = _pocket.get_state_for_audio_prompt(JARVIS_REF)
+            log(f"Pocket TTS cargado (voz clonada de jarvis.wav) en {time.time() - t0:.1f}s.")
+            return _pocket
+        except Exception as e:  # noqa: BLE001 — sin pesos de clonado → catálogo
+            log(f"  Clonado no disponible ({type(e).__name__}); uso la voz '{POCKET_VOICE}'.")
+    try:
+        _pocket_voice = _pocket.get_state_for_audio_prompt(POCKET_VOICE)
+        log(f"Pocket TTS cargado (voz de catálogo '{POCKET_VOICE}') en {time.time() - t0:.1f}s.")
+    except Exception as e:  # noqa: BLE001
+        log(f"No pude cargar la voz '{POCKET_VOICE}': {e!r} — usaré Piper/Ryan.")
         _pocket = None
     return _pocket
 
@@ -398,7 +425,7 @@ def _synthesize(text, voice, wav_path=None):
 
     # 1. Voz Jarvis clonada con Pocket TTS (local, CPU, ~200ms al primer audio).
     if _pocket_synthesize(text, wav):
-        log("  [voz] Jarvis (Pocket TTS)")
+        log("  [voz] Pocket TTS")
         return wav
 
     # 2. Fallback: Piper/Ryan local (por si Pocket TTS no cargó).
@@ -954,7 +981,7 @@ def main():
 
     # ── Pocket TTS: voz Jarvis clonada (local, CPU). Pre-carga para que el
     #    primer saludo ya salga en Jarvis, sin demora en el primer "FRIDAY".
-    log("Cargando Pocket TTS (voz Jarvis)...")
+    log("Cargando Pocket TTS...")
     _load_pocket()
 
     # ── faster-whisper: STT del habla libre (mejor con acento). Pre-carga

@@ -61,9 +61,9 @@
 |---|---|---|
 | Wake word | Vosk `small-en-us-0.15` con grammar restringida | detecta "friday" ✔ |
 | STT | **mlx-whisper `whisper-large-v3-turbo`** (GPU/Metal) → fallback faster-whisper `small.en` (CPU) → Vosk | frase de 9 palabras exacta en **1.06 s** |
-| TTS | Pocket TTS con voz **Jarvis clonada** (`voices/jarvis.wav`) → fallback Piper `en_US-ryan-high` | Piper ✔ · Jarvis pendiente de `jarvis.wav` + login HF |
+| TTS | Pocket TTS: voz **clonada** de `voices/jarvis.wav` si existe (pesos gated, requiere login HF) → si no, voz de **catálogo** `TTS_VOICE` (default `charles`, sin login) → fallback Piper `en_US-ryan-high` | catálogo ✔ carga 0.9 s, ~5 s por frase larga en CPU · muestras en `voices/samples/` |
 
-Knobs: `FRIDAY_STT=mlx|faster-whisper`, `FRIDAY_MLX_WHISPER_MODEL=<repo HF>` (env del listener).
+Knobs: `TTS_VOICE` (`.env`), `FRIDAY_STT=mlx|faster-whisper`, `FRIDAY_MLX_WHISPER_MODEL=<repo HF>` (env del listener).
 
 **Futuro — `gemini-3.8-live`** (GA 2026-09): audio nativo de punta a punta con barge-in; reemplazaría
 STT → LLM → TTS en un solo stream (latencia mucho menor). Contras: audio a $3/1M in · $12/1M out,

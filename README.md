@@ -42,11 +42,14 @@ La primera vez macOS pide permiso de **Micrófono**, y el listener baja `whisper
 
 > ¿Por qué Python 3.12? `vosk`, `pyaudio` y `ctranslate2` no siempre tienen wheels para 3.13+.
 
-### Voz de Jarvis
+### Voz
 
-Pocket TTS clona la voz desde `voices/jarvis.wav` (clip propio de ~9 s, versionado en git). El modelo
-con clonado es *gated*: aceptá los términos en https://huggingface.co/kyutai/pocket-tts y corré
-`./venv/bin/hf auth login` una vez. Sin eso, FRIDAY habla con Piper/Ryan.
+FRIDAY habla con **Pocket TTS** usando una voz del catálogo (`TTS_VOICE` en `.env`, default `charles`;
+escuchá las opciones con `afplay voices/samples/<voz>.wav`). No requiere login.
+
+Opcional, clonar una voz: dejá un clip limpio de ~9 s en `voices/jarvis.wav` (se versiona en git),
+aceptá los términos en https://huggingface.co/kyutai/pocket-tts y corré `./venv/bin/hf auth login`.
+Usá una voz propia o de alguien que lo haya autorizado. Si Pocket TTS falla, cae a Piper/Ryan.
 
 ## Configuración (`.env`)
 

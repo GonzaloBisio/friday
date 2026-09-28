@@ -33,7 +33,7 @@ uso y `keep_alive=30m`). "shutdown" por voz descarga el modelo, no mata el servi
 4. **STT** — **mlx-whisper `large-v3-turbo` en la GPU** (~1 s por frase en el M4); fallback
    faster-whisper `small.en` (CPU) y, en último caso, el texto de Vosk.
 5. **Cerebro** — `POST /api/chat` → `brain.chat()` con function calling (ver abajo).
-6. **TTS** — Pocket TTS con la voz **clonada de Jarvis** (`voices/jarvis.wav`); fallback Piper/Ryan. El
+6. **TTS** — Pocket TTS con voz de catálogo (`TTS_VOICE`) o clonada si hay `voices/jarvis.wav`; fallback Piper/Ryan. El
    texto se parte en bloques <35 tokens (Pocket saltea palabras si se pasa). Reproduce con `afplay`.
 7. **Interrupción** — mientras habla, el mic sigue: si decís algo con sustancia (≥5 chars, tras 0.8 s de
    gracia anti-eco), corta y te atiende.
