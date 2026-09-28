@@ -3,8 +3,7 @@
 > Verificado el **2026-09-26** contra [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models),
 > [/pricing](https://ai.google.dev/gemini-api/docs/pricing), [/thinking](https://ai.google.dev/gemini-api/docs/thinking)
 > y [ollama.com/library/gemma4](https://ollama.com/library/gemma4/tags). Hardware objetivo: **MacBook M4, 16 GB**.
-> ⚠️ Los modelos 3.x **no se probaron todavía contra la API real** (falta la key en esta Mac):
-> la integración está cubierta por tests con mocks. Primera prueba en vivo: ver §6.
+> Gemini 3.x verificado en vivo el 2026-09-27 (§7).
 
 ## 1. Por qué hubo que migrar
 
@@ -60,44 +59,74 @@
 | Etapa | Qué usa | Medido en el M4 |
 |---|---|---|
 | Wake word | Vosk `small-en-us-0.15` con grammar restringida | detecta "friday" ✔ |
-| STT | **mlx-whisper `whisper-large-v3-turbo`** (GPU/Metal) → fallback faster-whisper `small.en` (CPU) → Vosk | frase de 9 palabras exacta en **1.06 s** |
-| TTS | Pocket TTS: voz **clonada** de `voices/jarvis.wav` si existe (pesos gated, requiere login HF) → si no, voz de **catálogo** `TTS_VOICE` (default `charles`, sin login) → fallback Piper `en_US-ryan-high` | catálogo ✔ carga 0.9 s, ~5 s por frase larga en CPU · muestras en `voices/samples/` |
+| STT | **Parakeet `parakeet-tdt-0.6b-v3`** (MLX/GPU) → fallback whisper-large-v3-turbo (MLX) → faster-whisper `small.en` (CPU) → Vosk | ver tabla abajo |
+| TTS | Pocket TTS **en streaming**: voz clonada de `voices/jarvis.wav` si existe (pesos gated, login HF) → si no, voz de **catálogo** `TTS_VOICE` (default **`michael`**, sin login) → fallback Piper `en_US-ryan-high` | 1er audio **0.04–0.09 s**; RTF 0.14 (6.4 s de audio en 0.88 s) |
 
-Knobs: `TTS_VOICE` (`.env`), `FRIDAY_STT=mlx|faster-whisper`, `FRIDAY_MLX_WHISPER_MODEL=<repo HF>` (env del listener).
+Benchmark STT (4 frases de ~3 s, voz sintética; el único error de todos fue "reservation**s**"):
 
-**Futuro — `gemini-3.8-live`** (GA 2026-09): audio nativo de punta a punta con barge-in; reemplazaría
-STT → LLM → TTS en un solo stream (latencia mucho menor). Contras: audio a $3/1M in · $12/1M out,
-depende de internet y **pierde la voz clonada de Jarvis**. Vale un experimento como modo opcional.
+| Modelo | Media | Exactas |
+|---|---|---|
+| **parakeet-tdt-0.6b-v3** (default) | **0.14 s** | 3/4 |
+| whisper-small.en | 0.26 s | 3/4 |
+| whisper-large-v3-turbo | 1.05 s | 3/4 |
+| distil-whisper-large-v3 | 2.06 s | 2/4 |
 
-## 5. Costo por turno
+Whisper siempre procesa 30 s de audio (padding) aunque hables 3: por eso Parakeet gana 7×. ⚠️ Medido
+con voz sintética, no con acento real: si entiende peor, `FRIDAY_STT=mlx` vuelve a whisper-turbo.
 
-Cada llamada al LLM manda **~2.9K tokens fijos**: system prompt (~510) + schema de tools (~2.4K,
-ver [TOOLS.md](TOOLS.md)) + memorias (hasta 30) + historial (12 turnos). Un turno de voz con una
-tool son **2 llamadas**. Estimación (8K tokens in, ~150 out por turno):
+Knobs (env del listener salvo `TTS_VOICE`): `TTS_VOICE` (`.env`), `FRIDAY_STT=parakeet|mlx|faster-whisper`,
+`FRIDAY_END_SILENCE` (default 0.8 s), `FRIDAY_PARAKEET_MODEL`, `FRIDAY_MLX_WHISPER_MODEL`.
 
-| Modelo | Sin cache | Con cache implícito (~75% del input) | 1.500 turnos/mes |
+## 5. Latencia de un turno (de que dejás de hablar a que FRIDAY suena)
+
+| Etapa | Antes | Ahora | Qué se hizo |
 |---|---|---|---|
-| 3.5-flash-lite | ~$0.0028 | **~$0.0012** | ~$1.8 (sin cache ~$4.2) |
-| 3.6/3.8-flash | ~$0.0066 | ~$0.0025 | ~$3.8 (x2 desde 2027) |
-| 3.1-pro-preview | ~$0.03 | — | solo a pedido |
+| Cierre de turno (silencio) | 1.3 s + hasta 0.25 s | **0.8 s** (+≤0.1 s) | `END_SILENCE_S` 0.8, lectura del mic cada 100 ms |
+| STT | 1.05–1.4 s | **~0 s** | Parakeet (0.14 s) + **STT especulativo**: arranca a los 0.3 s de silencio, dentro de la espera del cierre |
+| LLM sin tool | ~0.8–1 s | ~0.8–1 s | "qué hora es" ya no llama tool (usa `[local time]`) |
+| LLM con tool | ~2–2.6 s | ~2–2.6 s | 2 llamadas en serie (inevitable) |
+| TTS al 1er audio | ~0.9 s + arranque afplay | **~0.09 s** | streaming Pocket TTS → PyAudio |
+| **Total sin tool** | **~4.6 s** | **~1.8 s** | |
+| **Total con tool** | **~6.2 s** | **~3.5 s** | |
 
-**Por qué importa el cache y qué se hizo** (`friday/core/context_window.py`):
-1. **Prefijo estable**: el system prompt lleva solo la **fecha**; la hora viaja en cada mensaje
-   (`[local time HH:MM]`). Antes la hora-minuto al inicio invalidaba el cache en cada llamada. Aplica
-   también a Ollama (reusa el KV-cache → menos prefill en el M4).
-2. **Resultados viejos recortados** a 600 chars (`tool_result_history_chars`): un `leer_pagina` de 6K
-   chars ya no se reenvía 12 turnos.
-3. **No** se hizo ruteo dinámico de tools (mandar solo las relevantes): cambiaría el prefijo en cada
-   turno (rompe el cache) y arriesga que el modelo no encuentre la tool.
+Cada turno loguea el desglose en `voices/friday-wake.log` (`[tiempos] respuesta ~X s = endpoint + STT +
+LLM + TTS 1er audio`). Charla continua: tras la wake word no hace falta repetirla (60 s de silencio
+para salir); barge-in con filtro de **eco por contenido** (`_is_echo`: si lo "oído" coincide ≥50% con lo
+que FRIDAY está diciendo, se ignora — antes se interrumpía sola con los parlantes de la MacBook).
 
-> Pendiente: el tracker de costos (`collectors/gemini_usage.py`) cobra todo el input a precio lleno;
-> registrar `usage_metadata.cached_content_token_count` daría el costo real y confirmaría que el
-> cache pega.
+Probado y descartado: keep-alive largo del cliente HTTP de Gemini (sin diferencia medible frente al
+ruido de red, 0.7–1.6 s).
 
-## 6. Primera prueba en vivo (cuando esté la key)
+**Siguiente salto — `gemini-3.8-live`** (GA 2026-09): audio nativo de punta a punta, full-duplex con
+barge-in; reemplazaría STT → LLM → TTS (latencia típica sub-segundo). Contras: audio a $3/1M in ·
+$12/1M out (≈ $0.10–0.15 por 10 min de charla → puede superar el tope de USD 4/mes), depende de
+internet y usa las voces de Gemini (se pierde `michael`/Pocket).
+
+## 6. Costo por turno (medido)
+
+Cada llamada manda **~3.6–4.0K tokens** (system ~0.6K + tools ~2.4K + memorias + historial). Un turno
+sin tool = 1 llamada; con tool = 2 (~7.6K). **El cache implícito NO aplica**: los 3.x Flash exigen
+**≥4.096 tokens** de input y `flash-lite` ni figura entre los soportados
+([docs de caching](https://ai.google.dev/gemini-api/docs/caching), verificado 2026-09-27; `cached=None`
+en todas las llamadas medidas). Precio lleno:
+
+| Modelo | Turno sin tool | Turno con tool | 1.500 turnos/mes (70/30) |
+|---|---|---|---|
+| **3.5-flash-lite** | ~$0.0012 | ~$0.0024 | **~$2.3** |
+| 3.6/3.8-flash | ~$0.0029 | ~$0.0058 | ~$5.5 (x2 desde 2027) |
+| 3.1-pro-preview | ~$0.008+ | — | solo a pedido |
+
+Qué reduce tokens de verdad (`friday/core/context_window.py`): resultados de tools de turnos previos
+recortados a 600 chars (`tool_result_history_chars`) y el prefijo estable (sigue sirviendo para el
+KV-cache de Ollama). Palanca pendiente: **achicar los schemas de tools** (~2.4K por llamada, ver
+[TOOLS.md](TOOLS.md)) — cada 1K menos ≈ −25% de costo.
+
+## 7. Verificación en vivo (2026-09-27)
+
+Gemini con key real: 3/3 pedidos con tool correcta (`info_sistema`, `obtener_fecha_hora`,
+`listar_procesos`), ~2 s por turno con tool, ~0.9 s sin tool. Para repetirla:
 
 ```bash
-# .env: LLM_PROVIDER=gemini + GEMINI_API_KEY=...
 bash stop.sh; bash start.sh
 curl -s -X POST http://127.0.0.1:8000/api/chat -H 'Content-Type: application/json' \
   -d '{"message":"how much RAM am I using?","model":"auto"}'   # debe llamar info_sistema

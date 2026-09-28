@@ -11,7 +11,7 @@ con **Gemma 4** vía Ollama (offline, o fallback automático si Gemini se queda 
 ```
 ┌──────────────────────────────── Mac (M4) ─────────────────────────────────┐
 │  friday/voice/wake.py  (LaunchAgent al login)                              │
-│    Vosk (wake word) → mlx-whisper (STT, GPU) → Pocket TTS/Piper → afplay   │
+│    Vosk (wake word) → Parakeet (STT, GPU) → Pocket TTS en streaming         │
 │        │ HTTP 127.0.0.1:8000/api/chat          ▲ WS /ws/live (avisos)      │
 │        ▼                                        │                          │
 │  friday.app  (FastAPI + APScheduler)  ── HUD http://127.0.0.1:8000/        │
@@ -44,7 +44,7 @@ La primera vez macOS pide permiso de **Micrófono**, y el listener baja `whisper
 
 ### Voz
 
-FRIDAY habla con **Pocket TTS** usando una voz del catálogo (`TTS_VOICE` en `.env`, default `charles`;
+FRIDAY habla con **Pocket TTS** usando una voz del catálogo (`TTS_VOICE` en `.env`, default `michael`;
 escuchá las opciones con `afplay voices/samples/<voz>.wav`). No requiere login.
 
 Opcional, clonar una voz: dejá un clip limpio de ~9 s en `voices/jarvis.wav` (se versiona en git),
@@ -64,7 +64,7 @@ GEMINI_API_KEY=tu-api-key
 |---|---|---|
 | Spotify | `SPOTIFY_CLIENT_ID/SECRET` | Requiere Premium. Auth one-time: `friday-spotify-auth` |
 | Gastos (Sheets) | `GOOGLE_SHEETS_CREDENTIALS`, `GASTOS_SPREADSHEET_ID` | Service account (JSON gitignored) |
-| NEXCOURT (AWS) | cadena boto3 + `NEXCOURT_MODE=cloudwatch` | IAM **read-only** dedicado, nunca root |
+| NEXCOURT | `NEXCOURT_MODE=cloudwatch` (AWS) · `direct`/`kong` (local) | Default `off`. En AWS: IAM **read-only** dedicado, nunca root |
 | AXIS (SSH) | `AXIS_ENABLED=true` | Alias `axis` en `~/.ssh/config` |
 
 > **Secretos**: nunca van al repo (`.env`, tokens y JSON de service account están en `.gitignore`).

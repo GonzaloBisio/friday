@@ -4,8 +4,8 @@
 > Regenerar: `./venv/bin/python scripts/gen_tool_index.py` (un test falla si queda viejo).
 
 - **30 tools** con todos los flags activos. Schema total ≈ **9,491 chars
-  (~2,372 tokens)** que viajan en CADA llamada al LLM → ver
-  [MODELS.md](MODELS.md#costo-por-turno) sobre cache implícito.
+  (~2,372 tokens)** que viajan en CADA llamada al LLM, a precio lleno (no hay
+  cache implícito por debajo de 4.096 tokens) → ver [MODELS.md](MODELS.md#6-costo-por-turno-medido).
 - **Riesgo**: LOW ejecuta solo · MEDIUM/HIGH queda pendiente de confirmación
   (`friday/agent/permissions.py`). `—` = tool de lectura directa (no pasa por el gate).
 - `param?` = opcional. La descripción es la 1ra línea del docstring (lo único que ve el

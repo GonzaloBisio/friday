@@ -28,15 +28,19 @@ uso y `keep_alive=30m`). "shutdown" por voz descarga el modelo, no mata el servi
    detección casi instantánea y CPU mínima.
 2. **Arranque** — si `:8000` no responde, `launch_friday()` corre `start.sh` (pidfile, asegura Ollama) y
    abre el HUD.
-3. **Escucha** — endpointing por **energía (RMS)**: cierra el turno tras ~1.3 s de silencio sostenido,
-   así una pausa para pensar no te corta.
-4. **STT** — **mlx-whisper `large-v3-turbo` en la GPU** (~1 s por frase en el M4); fallback
-   faster-whisper `small.en` (CPU) y, en último caso, el texto de Vosk.
+3. **Escucha** — endpointing por **energía (RMS)** leyendo el mic cada 100 ms: cierra el turno tras
+   0.8 s de silencio sostenido (`FRIDAY_END_SILENCE`), así una pausa corta no te corta.
+4. **STT** — **Parakeet `tdt-0.6b-v3` en la GPU** (0.14 s por frase); fallback whisper-turbo (MLX),
+   faster-whisper (CPU) y el texto de Vosk. **Especulativo**: arranca a los 0.3 s de silencio, dentro de
+   la espera del cierre → casi siempre ya está listo. Todo el STT corre en UN thread (`_STT_POOL`):
+   MLX ata sus streams al thread que los creó.
 5. **Cerebro** — `POST /api/chat` → `brain.chat()` con function calling (ver abajo).
-6. **TTS** — Pocket TTS con voz de catálogo (`TTS_VOICE`) o clonada si hay `voices/jarvis.wav`; fallback Piper/Ryan. El
-   texto se parte en bloques <35 tokens (Pocket saltea palabras si se pasa). Reproduce con `afplay`.
+6. **TTS** — Pocket TTS **en streaming** (`_StreamPlayer`: chunks directo a PyAudio, 1er audio ~0.09 s)
+   con voz de catálogo (`TTS_VOICE`, default `michael`) o clonada si hay `voices/jarvis.wav`; fallback
+   Piper/Ryan + `afplay`. El texto se parte en bloques <35 tokens (Pocket saltea palabras si se pasa).
 7. **Interrupción** — mientras habla, el mic sigue: si decís algo con sustancia (≥5 chars, tras 0.8 s de
-   gracia anti-eco), corta y te atiende.
+   gracia) que **no** sea eco de lo que FRIDAY está diciendo (`_is_echo`, ≥50% de palabras en común),
+   corta en ≤0.1 s y te atiende.
 8. **Mute** — "mute" silencia; queda escuchando solo "resume" (grammar Vosk, sin Whisper ni LLM).
 
 ## El cerebro
@@ -109,4 +113,9 @@ y research diario 08:00 (digest markdown determinista, sin LLM en el camino crí
 - **Pocket TTS con clonado es gated** en HuggingFace: aceptar términos + `hf auth login`.
 - **"unmute" no está en el vocabulario de Vosk** → la palabra de reactivación es "resume".
 - **macOS `/` es el volumen sellado**: el disco se mide en `/System/Volumes/Data` (`platform_info.disk_path`).
+- **HUD**: `render()` corre en cada `setState` (el reloj, cada 1 s). Toda escritura al DOM va por
+  `el.__setHTML` / `el.__setText` (solo escriben si cambió) — si no, parpadea todo. Polling pausado con la
+  pestaña oculta; alertas proactivas por WebSocket (historial una vez por conexión).
+- **MLX + threads**: "There is no Stream(cpu, 1) in current thread" = se usó un modelo MLX desde otro
+  thread. Todo el STT va por `_STT_POOL`.
 - **`pkill -f 'venv/bin/friday'` matchearía `friday-wake`**: el patrón está anclado en `shutdown_friday.sh`.

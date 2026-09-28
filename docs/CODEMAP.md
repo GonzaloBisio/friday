@@ -13,14 +13,14 @@
 voices/  (Vosk, Piper, jarvis.wav)        LaunchAgent com.friday.wake (al login)
    │                                                │
    ▼                                                ▼
-friday/voice/wake.py ── main():956 ─ Vosk grammar ["friday",…] ─► "friday" detectada
-   │  ├─ speak() saludo ─ _synthesize():418  Pocket TTS (Jarvis) → fallback Piper → afplay
+friday/voice/wake.py ── main():1119 ─ Vosk grammar ["friday",…] ─► "friday" detectada
+   │  ├─ speak() saludo ─ _synthesize():467  _start_speech → _StreamPlayer (Pocket streaming → PyAudio) │ Piper+afplay
    │  ├─ launch_friday() → start.sh (si :8000 no responde) → Ollama + friday.app
-   │  └─ conversation_loop → _run_conversation():775
-   │        ├─ _listen_turn():705   VAD por RMS, corta tras 1.3s de silencio
-   │        ├─ _transcribe()        mlx-whisper large-v3-turbo (GPU) │ faster-whisper │ Vosk
+   │  └─ conversation_loop → _run_conversation():931
+   │        ├─ _listen_turn():853   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
+   │        ├─ _transcribe()        Parakeet (GPU, _STT_POOL) │ whisper-turbo │ faster-whisper │ Vosk
    │        ├─ ask_friday() ── HTTP POST 127.0.0.1:8000/api/chat ──────────────┐
-   │        └─ _play_with_interrupt()  el mic sigue escuchando → barge-in      │
+   │        └─ _play_with_interrupt()  barge-in con filtro de eco (_is_echo)      │
    ▼                                                                             ▼
 friday/api/routes_chat.py:40 post_chat ─► brain.chat(msg, model="auto") (thread executor)
    │
@@ -40,7 +40,7 @@ friday/core/brain.py  FridayBrain.chat():86           (Gemini; Ollama = ollama_b
 ### Bootstrap y fondo
 
 ```
-friday.app:main():407 ─► FridaySystem():64
+friday.app:main():413 ─► FridaySystem():64
   ├─ SQLite (storage/db.py:get_connection) + RLock compartido por todos los repos
   ├─ tools: build_registry (lectura) + register_agent_tools (acciones gated)
   │         + memory/routine/health/research tools        → catálogo en docs/TOOLS.md
@@ -50,7 +50,7 @@ friday.app:main():407 ─► FridaySystem():64
   │    notifier 60s ─► ProactiveDispatcher ─► WS /ws/live ─► wake.proactive_listener
   │    analyst 30min (tendencias, estadístico) · briefings 08:30/22:00 (compose → lite)
   │    research 08:00 → knowledge/<cat>/<fecha>.md · purga métricas >30d (6h)
-  └─ start_api():291 uvicorn en settings.api_host (127.0.0.1) : HUD "/" + /api/* + /docs
+  └─ start_api():297 uvicorn en settings.api_host (127.0.0.1) : HUD "/" + /api/* + /docs
 ```
 
 ## 2. Archivos (qué es cada uno)
@@ -100,13 +100,14 @@ Ollama) · `pyproject.toml` (deps + extras `ir`,`voice`,`dev` + comandos `friday
 | **API** | `friday/api/main.py` | `create_app()`: monta routers (casi todos bajo `/api`). |
 | | `routes_*.py` | chat, agent (`/api/agent/run|confirm|tools|activity`), status/metrics, notifications, research, routines, lights/ir, nexcourt (re-login AWS), voice (log del listener), health, gastos, proactive/test, dashboard (`/`). |
 | | `ws.py` | `/ws/live`: métricas, "thinking", estado de servicios, eventos proactivos. |
-| **UI** | `friday/dashboard_web/index.html` | HUD "Command Center" (HTML puro, sin build). |
+| **UI** | `friday/dashboard_web/index.html` | HUD "Command Center" (HTML puro, sin build). Intervalos en `POLL_INTERVALS`; escrituras al DOM por `__setHTML`/`__setText` (solo si cambió); alertas por WS. |
 | | `friday/dashboard/` | Streamlit legacy (solo con `friday --streamlit`). |
 | **Voz** | `friday/voice/wake.py` | Listener completo (wake word, VAD, STT, TTS, barge-in, mute, proactivo). Funciones `[SO]`: `_play_wav_async`, `_show_toast`, `launch_friday`, `shutdown_systems`. |
 | | `friday/voice/shutdown_friday.sh` | Mata procesos por patrón/puerto; descarga modelos de Ollama. |
 | **Scripts** | `scripts/macos/setup.sh` | Instalación completa e idempotente. |
 | | `scripts/macos/install_autostart.sh` | LaunchAgent del listener (template en `com.friday.wake.plist.template`). |
 | | `scripts/gen_tool_index.py` | Regenera `docs/TOOLS.md` (test `tests/test_tool_index.py` lo exige). |
+| | `scripts/fix_codemap_refs.py` | Recalcula las `simbolo():N` de este archivo (test `tests/test_codemap.py` lo exige). |
 | **Legacy** | `friday/main.py`, `friday/core/cli.py` | Entrypoints de fases viejas; **nadie los importa** (usar `friday --cli`). Candidatos a borrar. |
 
 `tests/` espeja `friday/` 1:1 (`tests/core/test_brain.py` ↔ `friday/core/brain.py`, etc.).

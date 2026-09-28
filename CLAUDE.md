@@ -24,6 +24,7 @@ salvo que la tarea sea sobre eso. `friday/main.py` y `friday/core/cli.py` no se 
 ```bash
 ./venv/bin/python -m pytest -q                 # ~450 tests, <5 s. Correr SIEMPRE antes de terminar
 ./venv/bin/python scripts/gen_tool_index.py    # tras tocar cualquier tool (si no, falla un test)
+./venv/bin/python scripts/fix_codemap_refs.py  # si test_codemap falla (se corrieron líneas)
 ./venv/bin/ruff check friday tests
 bash start.sh / bash stop.sh                   # backend (log: friday.log)
 ./venv/bin/friday --cli                        # chat por terminal, sin API
