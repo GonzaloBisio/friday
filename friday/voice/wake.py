@@ -1,18 +1,22 @@
 """
-FRIDAY Wake — Windows native.
+FRIDAY Wake — listener de voz (macOS nativo).
 
-Escucha la wake word "FRIDAY" por micrófono (offline, con Vosk),
-saluda con voz Ryan (Piper TTS, offline, en inglés), lanza el
-sistema FRIDAY en WSL y entra en modo conversación por voz:
-transcribe lo que decís, lo manda al cerebro (API /chat) y
-responde hablando, en loop, hasta "stop" o silencio.
+Escucha la wake word "FRIDAY" por micrófono (offline, con Vosk), saluda con la
+voz Jarvis (Pocket TTS; fallback Piper/Ryan), levanta el backend si no está
+corriendo y entra en modo conversación: transcribe lo que decís, lo manda al
+cerebro (API /chat) y responde hablando, en loop, hasta "stop" o silencio.
 
-Requiere (en Python 3.12):
-    pip install vosk pyaudio piper-tts
+Todo corre en el MISMO host que el backend (venv del repo). Lo específico de SO
+vive en las funciones marcadas [SO]: audio con `afplay`, notificaciones con
+`osascript` (Linux: aplay / notify-send). STT con mlx-whisper (GPU) si está.
+Autostart al login: scripts/macos/install_autostart.sh (LaunchAgent).
 
-Modelos (en C:\\Users\\gonza\\friday\\voices):
-    - en_US-ryan-high.onnx (+ .onnx.json)   -> voz (Piper)
-    - vosk-model-small-en-us-0.15           -> reconocimiento (Vosk)
+Requiere Python 3.12:  pip install -e ".[voice]"   (desde el repo)
+
+Modelos (en VOICES_DIR; override con FRIDAY_VOICES_DIR):
+    - en_US-ryan-high.onnx (+ .onnx.json)   -> voz fallback (Piper)
+    - vosk-model-small-en-us-0.15           -> wake word (Vosk)
+    - jarvis.wav                            -> clip ~9s para clonar la voz (Pocket TTS)
 """
 
 import os
@@ -38,8 +42,12 @@ try:  # Piper 1.x: length_scale viaja en SynthesisConfig, no como kwarg.
 except ImportError:  # Piper viejo no lo tiene.
     SynthesisConfig = None
 
-# ── Rutas ──────────────────────────────────────────────────────────
-VOICES_DIR = r"C:\Users\gonza\friday\voices"
+# ── Plataforma y rutas ─────────────────────────────────────────────
+IS_MACOS = sys.platform == "darwin"
+# Raíz del repo (friday/voice/wake.py → ../..).
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Modelos de voz + log. <repo>/voices está gitignored (salvo jarvis.wav).
+VOICES_DIR = os.environ.get("FRIDAY_VOICES_DIR") or os.path.join(REPO_DIR, "voices")
 PIPER_MODEL = os.path.join(VOICES_DIR, "en_US-ryan-high.onnx")
 VOSK_MODEL = os.path.join(VOICES_DIR, "vosk-model-small-en-us-0.15")
 LOG_FILE = os.path.join(VOICES_DIR, "friday-wake.log")
@@ -47,8 +55,6 @@ LOG_FILE = os.path.join(VOICES_DIR, "friday-wake.log")
 # Generado desde el MP3 mejorado (Adobe Podcast) — clip limpio de ~9s.
 JARVIS_REF = os.path.join(VOICES_DIR, "jarvis.wav")
 
-# Evita que los subprocess hagan parpadear ventanas de consola (modo oculto).
-NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # ── Wake word ──────────────────────────────────────────────────────
 # Vocabulario restringido: Vosk solo intenta reconocer estas palabras,
@@ -61,7 +67,7 @@ TRIGGER = "friday"
 # compat, pero el dashboard que se abre al activar es el HUD nuevo (abajo).
 DASHBOARD_PORT = 8510
 
-# API REST de FRIDAY (para conversar). Alcanzable desde Windows vía WSL mirrored.
+# API REST de FRIDAY (para conversar), en el mismo host.
 # 127.0.0.1 (no "localhost") para forzar IPv4 y evitar el timeout de IPv6 (::1).
 API_PORT = 8000
 API_URL = f"http://127.0.0.1:{API_PORT}/api"
@@ -84,7 +90,7 @@ WS_URL = f"ws://127.0.0.1:{API_PORT}/ws/live"
 PROACTIVE_RECV_TIMEOUT = 35
 
 # Serializa TODA reproducción por `speak()` (saludos, salidas, y voz proactiva)
-# para que dos SoundPlayer nunca se pisen entre el thread del mic y el del WS.
+# para que dos reproducciones nunca se pisen entre el thread del mic y el del WS.
 _audio_lock = threading.Lock()
 # Marca que hay una conversación activa: mientras esté seteado, la voz proactiva
 # CEDE el canal (igual muestra el toast) para no hablar encima tuyo ni meter eco
@@ -102,12 +108,19 @@ _pocket_voice = None  # voice_state del clon Jarvis (de JARVIS_REF)
 # ── STT conversación: faster-whisper (local, CPU) ──────────────────
 # Vosk se usa solo para la wake word y como VAD/endpointer. La transcripción
 # del habla libre la hace Whisper: MUCHO mejor con acento no nativo. CPU int8
-# (~1s por frase corta); GPU descartado por el lío de DLLs CUDA en Windows.
+# (~1s por frase corta). En macOS se prefiere mlx-whisper (GPU), ver abajo.
 # small.en va bien; si querés más precisión, subí a "medium.en" (más lento).
 WHISPER_MODEL = "small.en"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE = "int8"
 _whisper = None       # instancia de WhisperModel (lazy)
+# macOS Apple Silicon: mlx-whisper corre en la GPU (Metal) → large-v3-turbo a la
+# latencia de small.en en CPU, con MUCHA mejor precisión. FRIDAY_STT fuerza el
+# backend ("mlx" | "faster-whisper"); por defecto mlx si está instalado.
+MLX_WHISPER_MODEL = os.environ.get(
+    "FRIDAY_MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"
+)
+_stt_backend = None   # "mlx" | "faster-whisper" | "none" (resuelto lazy)
 
 # ── Conversación por voz ───────────────────────────────────────────
 # Tras la wake word, FRIDAY entra en modo conversación: escucha tu
@@ -239,20 +252,38 @@ def _load_pocket():
 
 
 def _load_whisper():
-    """Carga faster-whisper UNA sola vez. None si falla (cae a Vosk)."""
-    global _whisper
-    if _whisper is not None:
-        return _whisper
+    """Carga el STT UNA sola vez: mlx-whisper (macOS) o faster-whisper.
+
+    Devuelve algo truthy si hay STT disponible; None si falla (cae a Vosk).
+    """
+    global _whisper, _stt_backend
+    if _stt_backend is not None:
+        return _whisper if _stt_backend != "none" else None
+    wanted = os.environ.get("FRIDAY_STT", "mlx" if IS_MACOS else "faster-whisper")
+    if wanted == "mlx":
+        try:
+            import mlx_whisper
+            import numpy as np
+            t0 = time.time()
+            # Warm-up: baja/carga los pesos ahora y no en el primer turno.
+            mlx_whisper.transcribe(np.zeros(16000, dtype=np.float32),
+                                   path_or_hf_repo=MLX_WHISPER_MODEL, language="en")
+            _whisper, _stt_backend = mlx_whisper, "mlx"
+            log(f"mlx-whisper '{MLX_WHISPER_MODEL}' cargado en {time.time() - t0:.1f}s.")
+            return _whisper
+        except Exception as e:  # noqa: BLE001 — sin MLX → faster-whisper
+            log(f"mlx-whisper no disponible ({e!r}); pruebo faster-whisper.")
     try:
         from faster_whisper import WhisperModel
         t0 = time.time()
         _whisper = WhisperModel(
             WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE
         )
+        _stt_backend = "faster-whisper"
         log(f"faster-whisper '{WHISPER_MODEL}' cargado en {time.time() - t0:.1f}s.")
     except Exception as e:  # noqa: BLE001 — si falla, se usa Vosk como fallback
         log(f"No pude cargar faster-whisper: {e!r} — usaré Vosk.")
-        _whisper = None
+        _whisper, _stt_backend = None, "none"
     return _whisper
 
 
@@ -264,6 +295,9 @@ def _transcribe(audio_bytes):
         import numpy as np
 
         arr = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if _stt_backend == "mlx":
+            out = _whisper.transcribe(arr, path_or_hf_repo=MLX_WHISPER_MODEL, language="en")
+            return (out.get("text") or "").strip()
         segments, _ = _whisper.transcribe(arr, language="en")
         return " ".join(s.text for s in segments).strip()
     except Exception as e:  # noqa: BLE001 — ante fallo, el caller usa Vosk
@@ -323,8 +357,8 @@ def _split_for_tts(text, max_tokens=_TTS_MAX_TOKENS):
 def _pocket_synthesize(text, wav_path):
     """Sintetiza con Pocket TTS (voz Jarvis clonada, local/CPU). True si escribió.
 
-    Escribe WAV PCM int16 con la stdlib (no scipy): Media.SoundPlayer de Windows
-    solo reproduce PCM, un WAV float saldría mudo. Convierte float[-1,1]→int16.
+    Escribe WAV PCM int16 con la stdlib (no scipy): el formato que cualquier
+    reproductor acepta (afplay/aplay). Convierte float[-1,1]→int16.
     Parte el texto en bloques cortos para no superar el límite de Pocket TTS.
     """
     if _load_pocket() is None:
@@ -394,20 +428,15 @@ def _synthesize(text, voice, wav_path=None):
 
 
 def _play_wav_async(wav):
-    """Reproduce WAV en Windows sin bloquear a Python. Retorna el Popen.
+    """[SO] Reproduce un WAV sin bloquear a Python. Retorna el Popen.
 
-    Usa PlaySync() (no Play()): Play() reproduce en un thread de fondo y el
-    `powershell -c` termina al instante, MATANDO el audio antes de que suene
-    (por eso la conversación se veía en el log pero no se escuchaba). PlaySync()
-    mantiene vivo el proceso de PowerShell hasta que el audio termina; como corre
-    dentro de un Popen, Python no se bloquea y `player.poll()` sigue devolviendo
-    None mientras suena — justo lo que necesita el loop de interrupción.
+    macOS: `afplay` (nativo). Linux: `aplay`. Corre en un Popen para que el loop
+    de interrupción pueda seguir leyendo el mic y cortar con `player.kill()`
+    mientras `player.poll()` devuelve None (= todavía suena).
     """
-    ps = f'(New-Object Media.SoundPlayer "{wav}").PlaySync()'
-    return subprocess.Popen(
-        ["powershell", "-c", ps],
-        creationflags=NO_WINDOW,
-    )
+    if IS_MACOS:
+        return subprocess.Popen(["afplay", wav])
+    return subprocess.Popen(["aplay", "-q", wav])
 
 
 def _stop_player(player):
@@ -427,9 +456,7 @@ def speak(text, voice):
     """
     with _audio_lock:
         wav = _synthesize(text, voice)
-        ps = f'(New-Object Media.SoundPlayer "{wav}").PlaySync()'
-        subprocess.run(["powershell", "-c", ps], capture_output=True,
-                       creationflags=NO_WINDOW)
+        _play_wav_async(wav).wait()
 
 
 # Anti-eco: mientras FRIDAY habla, el mic capta su PROPIA voz (eco acústico) y Vosk
@@ -517,20 +544,16 @@ def api_ready(timeout=40):
 
 
 def launch_friday():
-    """Lanza FRIDAY en WSL (el comando `wsl` auto-inicia la distro).
+    """[SO] Levanta el backend (API + HUD + scheduler) en este mismo host.
 
-    La voz Jarvis ahora corre LOCAL en Windows (Pocket TTS en este mismo
-    proceso), así que acá solo se levanta el backend: Ollama + FRIDAY (API +
-    dashboard). Ya no hay sidecar TTS en WSL.
+    start.sh usa pidfile (no duplica) y asegura Ollama si no responde. Sesión nueva
+    (start_new_session) para que el backend sobreviva al listener.
     """
-    subprocess.Popen([
-        "wsl", "-d", "Ubuntu", "--", "bash", "-c",
-        # Asegurar Ollama ANTES de arrancar FRIDAY: si no, el cerebro local
-        # queda sin backend y responde el mensaje offline. pgrep -x evita
-        # arrancar un segundo `ollama serve` si ya está corriendo.
-        "pgrep -x ollama >/dev/null 2>&1 || (ollama serve >/dev/null 2>&1 &) ; "
-        "cd /home/gonzalo/dev/personal/friday && ./venv/bin/friday",
-    ], creationflags=NO_WINDOW)
+    subprocess.Popen(
+        ["bash", os.path.join(REPO_DIR, "start.sh")],
+        cwd=REPO_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def open_dashboard(timeout=40):
@@ -592,83 +615,24 @@ def _set_light(state):
 
 
 def shutdown_systems():
-    """Apaga FRIDAY (API + dashboard + scheduler), Ollama y libera RAM de WSL2.
+    """Apaga FRIDAY (API + HUD + scheduler) y descarga los modelos de Ollama.
 
-    Mata TODOS los procesos relacionados a friday sin importar cómo fueron
-    arrancados (`python -m friday.app` o `./venv/bin/friday`), usando un
-    script externo para evitar que pkill -f mate al shell que ejecuta los
-    comandos (footgun clásico cuando el patrón aparece en la propia línea
-    de comando del bash -c).
+    stop.sh mata los procesos por pidfile, patrón y puerto (shutdown_friday.sh).
+    El servicio Ollama queda vivo (arranca con el login) para que la próxima wake
+    word no espere su arranque; solo se libera la RAM del modelo.
 
-    Retorna True si se pudo matar todo, False si hubo error.
+    Retorna True si stop.sh terminó OK.
     """
     log("⚡ SHUTDOWN: apagando todo...")
-
-    # 1. Kill graceful (best-effort). Mata FRIDAY + Ollama via script externo
-    #    para que SQLite/Piper flusheen prolijo. NO es crítico para liberar
-    #    RAM: el paso 2 (wsl --shutdown) mata todo lo de adentro igual.
-    #    Por eso va blindado: si se cuelga o falla, NO debe impedir el paso 2.
-    SHUTDOWN_SCRIPT = "/home/gonzalo/dev/personal/friday/friday/voice/shutdown_friday.sh"
-    log("  → Matando FRIDAY + Ollama (graceful)...")
     try:
-        r1 = subprocess.run(
-            ["wsl", "-d", "Ubuntu", "--", "bash", SHUTDOWN_SCRIPT],
-            capture_output=True, text=True, timeout=10,
-        )
-        if "done" in (r1.stdout or ""):
-            log("  ✓ FRIDAY (API + Dashboard) + Ollama apagados")
-        else:
-            log(f"  ⚠ shutdown_friday.sh: sin 'done' (stdout={r1.stdout!r} stderr={r1.stderr!r})")
-    except subprocess.TimeoutExpired:
-        log("  ⚠ graceful kill se colgó — sigo igual al paso 2 (wsl --shutdown)")
-    except Exception as e:  # noqa: BLE001 — nada puede frenar el paso 2
-        log(f"  ⚠ graceful kill error: {e!r} — sigo igual al paso 2")
-
-    # 2. PASO CRÍTICO — Liberar la RAM de VmmemWSL.
-    #    VmmemWSL es el proceso HOST de Windows que sostiene la VM de WSL2.
-    #    Matar procesos ADENTRO de WSL (paso 1) NO le devuelve la RAM a
-    #    Windows: WSL2 se la queda. La ÚNICA forma de que VmmemWSL baje a ~0
-    #    es apagar la VM entera. Esto mata TODO lo de adentro (Friday,
-    #    dashboard, modelo, Ollama) de un saque y libera los GB reservados.
-    #    Por eso este paso SIEMPRE corre, pase lo que pase en el paso 1.
-    log("  → Liberando RAM de WSL2 (wsl --shutdown)...")
-    ok = False
-    try:
-        r2 = subprocess.run(
-            ["wsl", "--shutdown"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if r2.returncode == 0:
-            log("  ✓ wsl --shutdown OK")
-            ok = True
-        else:
-            log(f"  ⚠ wsl --shutdown falló (código {r2.returncode}, stderr={r2.stderr!r})")
+        r = subprocess.run(["bash", os.path.join(REPO_DIR, "stop.sh")],
+                           capture_output=True, text=True, timeout=20)
+        log("  ✓ FRIDAY apagado" if r.returncode == 0
+            else f"  ⚠ stop.sh código {r.returncode}: {r.stderr!r}")
+        return r.returncode == 0
     except Exception as e:  # noqa: BLE001
-        log(f"  ✗ wsl --shutdown error: {e!r}")
-
-    # 3. Verificar que NINGUNA distro siga corriendo (= VmmemWSL bajando).
-    #    Si quedó alguna viva, reintentamos una vez.
-    try:
-        chk = subprocess.run(
-            ["wsl", "--list", "--running"],
-            capture_output=True, text=True, timeout=10,
-        )
-        # WSL devuelve UTF-16; capture_output+text suele dar texto con NULs.
-        running = (chk.stdout or "").replace("\x00", "").strip()
-        # La primera línea es un encabezado ("Distribuciones... en ejecución").
-        still_up = [ln for ln in running.splitlines()[1:] if ln.strip()]
-        if still_up:
-            log(f"  ⚠ distros aún vivas: {still_up} — reintento wsl --shutdown")
-            subprocess.run(["wsl", "--shutdown"], capture_output=True,
-                           text=True, timeout=30)
-            ok = True  # se mandó el shutdown igual
-        else:
-            log("  ✓ VmmemWSL apagado — RAM liberada")
-            ok = True
-    except Exception as e:  # noqa: BLE001
-        log(f"  ⚠ no pude verificar distros corriendo: {e!r}")
-
-    return ok
+        log(f"  ✗ stop.sh error: {e!r}")
+        return False
 
 
 def _muted_wait(stream, model):
@@ -861,39 +825,27 @@ def _run_conversation(stream, model, voice):
 
 
 # ── Canal proactivo: toast + listener WebSocket ────────────────────
-def _ps_escape(s):
-    """Sanitiza un string para incrustarlo en un literal PowerShell de comillas dobles."""
-    return (s or "").replace("`", "").replace('"', "'").replace("\n", " ").strip()
+
+
+_MAC_NOTIFY_SCRIPT = (
+    "on run argv\n"
+    "  display notification (item 2 of argv) with title (item 1 of argv)\n"
+    "end run"
+)
 
 
 def _show_toast(title, message):
-    """Muestra un toast nativo de Windows (WinRT vía PowerShell, sin dep nueva).
+    """[SO] Notificación nativa: macOS (osascript), Linux (notify-send).
 
-    Best-effort: si el toast falla (perfil raro de Windows, permisos), se loguea
-    y se sigue — la voz ya cubre lo crítico. No queremos que un toast tumbe el
-    listener.
+    Título y texto viajan por argv → sin escapes ni inyección. Best-effort: si
+    falla (permisos de notificaciones), se loguea y se sigue; la voz cubre lo crítico.
     """
-    title_e = _ps_escape(title) or "FRIDAY"
-    message_e = _ps_escape(message)
-    ps = (
-        '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;'
-        '[Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null;'
-        '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null;'
-        '$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);'
-        '$x = $t.GetElementsByTagName("text");'
-        f'$x.Item(0).AppendChild($t.CreateTextNode("{title_e}")) | Out-Null;'
-        f'$x.Item(1).AppendChild($t.CreateTextNode("{message_e}")) | Out-Null;'
-        '$toast = [Windows.UI.Notifications.ToastNotification]::new($t);'
-        '$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("FRIDAY");'
-        '$n.Show($toast);'
-    )
+    argv = (["osascript", "-e", _MAC_NOTIFY_SCRIPT, title or "FRIDAY", message or ""]
+            if IS_MACOS else ["notify-send", title or "FRIDAY", message or ""])
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, creationflags=NO_WINDOW, timeout=8,
-        )
+        subprocess.run(argv, capture_output=True, timeout=8)
     except Exception as e:  # noqa: BLE001
-        log(f"  [proactivo] toast falló: {e!r}")
+        log(f"  [proactivo] notificación falló: {e!r}")
 
 
 def _handle_proactive(data, voice):
@@ -915,7 +867,7 @@ def proactive_listener(voice):
     """Thread de fondo: se suscribe al WS del backend y actúa eventos proactivos.
 
     Reconecta solo si el backend todavía no levantó o se cae la conexión. Si la
-    lib `websocket-client` no está instalada en el Python de Windows, loguea y el
+    lib `websocket-client` no está instalada, loguea y el
     thread termina silenciosamente (el resto del listener de voz sigue intacto).
     """
     try:
@@ -1007,7 +959,7 @@ def main():
 
     # ── faster-whisper: STT del habla libre (mejor con acento). Pre-carga
     #    para que el primer turno no pague los ~16s de carga del modelo.
-    log("Cargando faster-whisper (reconocimiento)...")
+    log("Cargando STT (mlx-whisper o faster-whisper)...")
     _load_whisper()
 
     # ── Canal proactivo: thread que escucha al backend y avisa (voz + toast).
@@ -1054,7 +1006,7 @@ def main():
 
                 # Asegurar que el backend (API) esté corriendo para conversar.
                 if not is_running(API_PORT):
-                    log("  Lanzando FRIDAY en WSL...")
+                    log("  Lanzando backend de FRIDAY...")
                     launch_friday()
                     open_dashboard()  # abre la pestaña solo en el primer arranque
 

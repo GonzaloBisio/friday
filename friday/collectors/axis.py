@@ -6,7 +6,8 @@ en el host remoto (alias `axis` en ~/.ssh/config).
 
 Emite con `source="axis"`. Por container: status (running), cpu_percent, mem_percent.
 
-El acceso SSH usa la key nativa de WSL ya autorizada en el droplet.
+El acceso SSH usa tu key local (~/.ssh) ya autorizada en el droplet: en una máquina
+nueva hay que copiar la key y el alias `axis` de ~/.ssh/config (ver docs/MIGRATION.md).
 """
 
 from __future__ import annotations

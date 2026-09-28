@@ -35,8 +35,6 @@ token.json
 *.pem
 *.key
 
-# Windows / WSL: alternate data streams (basura que aparece en \\wsl$)
-*:Zone.Identifier
 
 # SQLite databases
 *.db
@@ -70,3 +68,9 @@ friday.db-wal
 # Capa de conocimiento (digests de research auto-generados). Cuando empieces a
 # curar notas a mano y quieras versionarlas, sacá esta línea.
 knowledge/
+
+# Modelos de voz locales (Vosk, Piper, whisper) + logs del listener. Se bajan con
+# scripts/macos/setup_voice_models.sh. EXCEPCIÓN: jarvis.wav (clip propio para clonar
+# la voz, ~9s) sí se versiona para que viaje entre máquinas.
+voices/*
+!voices/jarvis.wav

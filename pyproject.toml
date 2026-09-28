@@ -2,10 +2,11 @@
 name = "friday"
 version = "0.1.0"
 description = "FRIDAY — Asistente personal con cerebro Gemini"
+# 3.12 recomendado: vosk/pyaudio/ctranslate2 no siempre tienen wheels para 3.13+.
 requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
-    # API + scheduler (backend WSL)
+    # API + scheduler
     "fastapi>=0.137",
     "uvicorn>=0.49",
     "websockets>=15",
@@ -33,11 +34,26 @@ dependencies = [
 # Emisor IR Broadlink RM4 Mini (control de luces LED + TV/aire por infrarrojo).
 # Opcional: con ir_backend="mock" (default) no hace falta. Instalar: pip install -e ".[ir]"
 ir = ["broadlink>=0.18"]
+# Listener de voz (friday/voice/wake.py). En macOS corre en el mismo venv que el
+# backend. Requiere portaudio del sistema (brew install portaudio). Python 3.12.
+voice = [
+    "vosk>=0.3.44",
+    "pyaudio",
+    "piper-tts",
+    "faster-whisper",
+    "pocket-tts",
+    "websocket-client",
+    "numpy>=2.0",
+    # STT en la GPU de Apple Silicon (Metal). Solo macOS arm64.
+    "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+dev = ["pytest>=8.0", "pytest-mock>=3.12", "pytest-asyncio>=0.23", "respx>=0.21", "ruff>=0.4"]
 
 [project.scripts]
 friday = "friday.app:main"
 friday-spotify-auth = "friday.integrations.spotify_auth:main"
 friday-ir-learn = "friday.integrations.ir.learn:main"
+friday-wake = "friday.voice.wake:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

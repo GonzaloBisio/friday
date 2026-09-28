@@ -1,4 +1,4 @@
-"""Ruta REST de voz — expone el log del listener de voz en Windows.
+"""Ruta REST de voz — expone el log del listener de voz (friday/voice/wake.py).
 
 GET /api/voice/log?n=30 — últimas N líneas del log de voz (friday-wake.log).
 """
@@ -11,14 +11,19 @@ from pathlib import Path
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
+from friday.config import settings
+
 router = APIRouter(tags=["voice"])
 
-# Ruta al log del listener de voz (Windows, accesible desde WSL vía /mnt/c).
-_VOICE_LOG_DEFAULT = "/mnt/c/Users/gonza/friday/voices/friday-wake.log"
+_REPO_DIR = Path(__file__).resolve().parents[2]
 
 
 def _voice_log_path() -> str:
-    return os.environ.get("FRIDAY_VOICE_LOG", _VOICE_LOG_DEFAULT)
+    """FRIDAY_VOICE_LOG > settings.voices_dir > <repo>/voices (mismo host)."""
+    if os.environ.get("FRIDAY_VOICE_LOG"):
+        return os.environ["FRIDAY_VOICE_LOG"]
+    voices = Path(settings.voices_dir) if settings.voices_dir else _REPO_DIR / "voices"
+    return str(voices / "friday-wake.log")
 
 
 @router.get("/voice/log")

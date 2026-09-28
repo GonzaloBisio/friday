@@ -2,7 +2,7 @@
 
 POST /api/proactive/test — emite un evento proactivo de prueba al cliente de
 voz (voz + toast), sin depender del notifier ni de umbrales. Herramienta de
-validación: confirma el circuito backend → WebSocket → cliente Windows de
+validación: confirma el circuito backend → WebSocket → listener de voz de
 punta a punta, y sirve para los Pilares 3/5 que también emiten proactivamente.
 """
 

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  FRIDAY Wake — LaunchAgent (arranca el listener de voz al iniciar sesión).
+  NO editar la copia en ~/Library/LaunchAgents: se genera desde este template
+  con scripts/macos/install_autostart.sh (reemplaza __REPO__).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.friday.wake</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/venv/bin/python</string>
+        <string>-m</string>
+        <string>friday.voice.wake</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchd arranca con un PATH mínimo: sin esto no ve ollama/brew/ffmpeg. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Reinicia si crashea; NO si salió bien (comando de voz "shutdown"). -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>__REPO__/voices/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO__/voices/launchd.log</string>
+</dict>
+</plist>

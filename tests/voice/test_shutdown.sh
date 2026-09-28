@@ -14,7 +14,7 @@
 
 set -u
 
-PROJECT_DIR="/home/gonzalo/dev/personal/friday"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SHUTDOWN_SCRIPT="$PROJECT_DIR/friday/voice/shutdown_friday.sh"
 FRIDAY_BIN="$PROJECT_DIR/venv/bin/friday"
 PASS=0
@@ -25,18 +25,20 @@ green() { printf "\033[32m%s\033[0m\n" "$1"; }
 red()   { printf "\033[31m%s\033[0m\n" "$1"; }
 bold()  { printf "\033[1m%s\033[0m\n" "$1"; }
 
+# lsof (macOS + Linux); ss como fallback en Linux mínimos.
 check_port_up() {
     local port=$1
-    ss -tlnp 2>/dev/null | grep -q ":${port}.*LISTEN"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -ti "tcp:${port}" -sTCP:LISTEN >/dev/null 2>&1
+    else
+        ss -tlnp 2>/dev/null | grep -q ":${port}.*LISTEN"
+    fi
 }
 
-check_port_down() {
-    local port=$1
-    ! ss -tlnp 2>/dev/null | grep -q ":${port}.*LISTEN"
-}
+check_port_down() { ! check_port_up "$1"; }
 
 count_friday_procs() {
-    pgrep -af 'friday\.app|venv/bin/friday|streamlit run' 2>/dev/null \
+    pgrep -lf 'friday\.app|venv/bin/friday|streamlit run' 2>/dev/null \
         | grep -v 'pgrep\|test_shutdown\|shutdown_friday\.sh\|grep' | wc -l
 }
 
@@ -69,7 +71,7 @@ green "  OK: ambiente limpio."
 echo ""
 echo "[1] Arrancando FRIDAY via ./venv/bin/friday..."
 cd "$PROJECT_DIR"
-nohup "$FRIDAY_BIN" --api-port 8000 --dashboard-port 8510 > /tmp/friday_shutdown_test.log 2>&1 &
+nohup "$FRIDAY_BIN" --streamlit --api-port 8000 --dashboard-port 8510 > /tmp/friday_shutdown_test.log 2>&1 &
 FRIDAY_PID=$!
 echo "  PID lancado: $FRIDAY_PID"
 
@@ -142,7 +144,7 @@ if [ "$REMAINING" -eq 0 ]; then
     green "  OK: no quedan procesos friday/streamlit vivos."
 else
     red "  FAIL: quedan $REMAINING procesos:"
-    pgrep -af 'friday\.app|venv/bin/friday|streamlit run' 2>/dev/null \
+    pgrep -lf 'friday\.app|venv/bin/friday|streamlit run' 2>/dev/null \
         | grep -v 'pgrep\|test_shutdown\|shutdown_friday\|grep'
     FAIL=$((FAIL + 1))
 fi

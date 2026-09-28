@@ -46,7 +46,7 @@ from friday.storage.notification_repo import NotificationRepository
 
 # Log a consola Y a archivo (friday.log) para poder debuggear lo que pasa
 # cuando FRIDAY se lanza en background desde el listener (stdout se pierde).
-# Tail en WSL:  tail -f /home/gonzalo/dev/personal/friday/friday.log
+# Tail:  tail -f friday.log   (en la raíz del repo)
 _LOG_FILE = Path(__file__).resolve().parent.parent / "friday.log"
 logging.basicConfig(
     level=logging.INFO,
@@ -307,11 +307,12 @@ class FridaySystem:
 
         def run_api():
             import uvicorn
-            uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+            # 127.0.0.1 por defecto (ver settings.api_host): la API no tiene auth.
+            uvicorn.run(app, host=settings.api_host, port=port, log_level="info")
 
         self._api_thread = threading.Thread(target=run_api, daemon=True, name="friday-api")
         self._api_thread.start()
-        logger.info("FastAPI escuchando en http://0.0.0.0:%d", port)
+        logger.info("FastAPI escuchando en http://%s:%d", settings.api_host, port)
 
     def stop(self) -> None:
         self.scheduler.shutdown(wait=False)
@@ -426,7 +427,7 @@ def main() -> None:
         return
 
     # Modo unificado: la API sirve TODO, incluido el HUD (Command Center) en la raíz.
-    # La voz Jarvis corre LOCAL en Windows (Pocket TTS en windows_wake.py).
+    # La voz Jarvis corre en el listener (friday/voice/wake.py), en el mismo host.
     system.start_api(port=args.api_port)
     logger.info("HUD (Command Center) en http://localhost:%d/", args.api_port)
     logger.info("API/Docs en http://localhost:%d/docs", args.api_port)

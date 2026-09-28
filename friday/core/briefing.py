@@ -11,7 +11,7 @@ determinista que garantiza que el ritual igual ocurra. Un briefing nunca se cae.
 
 El texto se emite por el canal proactivo (Pilar 1) con speak=True: el cliente
 de voz lo dice y muestra el toast. Si hay una conversación activa, el cliente
-cede la voz (muestra el toast igual) — esa coordinación vive del lado Windows.
+cede la voz (muestra el toast igual) — esa coordinación vive en el listener (friday/voice/wake.py).
 """
 
 from __future__ import annotations

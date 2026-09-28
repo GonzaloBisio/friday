@@ -1,4 +1,4 @@
-"""Acciones concretas de PC para FRIDAY."""
+"""Acciones concretas de PC para FRIDAY (macOS; Linux parcial)."""
 
 from __future__ import annotations
 
@@ -9,69 +9,59 @@ from pathlib import Path
 
 import psutil
 
+from friday import platform_info
 
-# Alias comunes → target de lanzamiento en Windows. Las URIs (spotify:, whatsapp:)
-# son lo más confiable para apps de Store/Electron.
-_WINDOWS_APP_TARGETS = {
-    "spotify": "spotify:",
-    "whatsapp": "whatsapp:",
-    "chrome": "chrome",
-    "google chrome": "chrome",
-    "edge": "msedge",
-    "firefox": "firefox",
-    "notepad": "notepad",
-    "bloc de notas": "notepad",
-    "calculadora": "calc",
-    "calculator": "calc",
-    "calc": "calc",
-    "explorador": "explorer",
-    "explorer": "explorer",
-    "terminal": "wt",
-    "vscode": "code",
-    "code": "code",
-    "visual studio code": "code",
+# Esquemas permitidos para abrir_url. http/https → navegador; spotify: → app.
+# Cerramos la lista a propósito: nada de file:, javascript:, etc.
+_ALLOWED_URL_SCHEMES = ("http://", "https://", "spotify:")
+
+# Alias hablados → nombre de la app en macOS (lo que entiende `open -a`).
+# Lo no mapeado se pasa tal cual (argv, sin shell → sin inyección).
+_MAC_APP_TARGETS = {
+    "spotify": "Spotify",
+    "whatsapp": "WhatsApp",
+    "chrome": "Google Chrome",
+    "google chrome": "Google Chrome",
+    "edge": "Microsoft Edge",
+    "firefox": "Firefox",
+    "safari": "Safari",
+    "notepad": "TextEdit",
+    "bloc de notas": "TextEdit",
+    "textedit": "TextEdit",
+    "calculadora": "Calculator",
+    "calculator": "Calculator",
+    "calc": "Calculator",
+    "explorador": "Finder",
+    "explorer": "Finder",
+    "finder": "Finder",
+    "terminal": "Terminal",
+    "vscode": "Visual Studio Code",
+    "code": "Visual Studio Code",
+    "visual studio code": "Visual Studio Code",
+    "intellij": "IntelliJ IDEA",
+    "slack": "Slack",
 }
 
-# Caracteres de control de shell — se rechazan en targets sin mapear (anti-inyección).
-_UNSAFE_CHARS = set('&|<>^%"\n\r')
+# AppleScript con el nombre por argv (no interpolado): "is running" NO lanza la
+# app (a diferencia de `tell application X to quit`, que la abriría para cerrarla).
+_MAC_QUIT_SCRIPT = (
+    "on run argv\n"
+    "  set appName to item 1 of argv\n"
+    "  if application appName is running then\n"
+    "    tell application appName to quit\n"
+    "    return \"ok\"\n"
+    "  end if\n"
+    "  return \"not_running\"\n"
+    "end run"
+)
 
-# Alias → nombre(s) del proceso (.exe) para cerrar en Windows. taskkill
-# matchea por IMAGE NAME (insensible a mayúsculas).
-#
-# Algunas apps son UWP/Store: el launcher (calc.exe) arranca la app real
-# (CalculatorApp.exe) y se AUTOCIERRA. Por eso algunos alias tienen una
-# LISTA de procesos a probar en orden — si el primero no está, prueba el
-# siguiente. Sin esto, taskkill /IM calc.exe encuentra nada porque calc.exe
-# ya exitó.
-_WINDOWS_KILL_TARGETS: dict[str, str | list[str]] = {
-    "spotify": "Spotify.exe",
-    "whatsapp": "WhatsApp.exe",
-    "chrome": "chrome.exe",
-    "google chrome": "chrome.exe",
-    "edge": "msedge.exe",
-    "firefox": "firefox.exe",
-    "notepad": "notepad.exe",
-    "bloc de notas": "notepad.exe",
-    # Calculator es UWP en Win11: calc.exe es solo el launcher. El proceso
-    # real es CalculatorApp.exe. Probar ambos por si acaso.
-    "calculadora": ["CalculatorApp.exe", "calc.exe"],
-    "calculator": ["CalculatorApp.exe", "calc.exe"],
-    "calc": ["CalculatorApp.exe", "calc.exe"],
-    "explorador": "explorer.exe",
-    "explorer": "explorer.exe",
-    "vscode": "Code.exe",
-    "code": "Code.exe",
-    "visual studio code": "Code.exe",
-    "terminal": "WindowsTerminal.exe",
-}
 
+# ── API pública (lo que ve el LLM) ──────────────────────────────────────────
+# La primera línea del docstring es la descripción que recibe el modelo
+# (tool_schema) → corta y precisa. Todo subprocess va con argv en lista (sin shell).
 
 def abrir_app(nombre: str) -> str:
-    """Abre una aplicación de Windows desde WSL (vía interop con cmd.exe).
-
-    FRIDAY corre en WSL/Linux; las apps viven en Windows. Esta acción cruza el
-    puente con `cmd.exe /c start`. Resuelve alias comunes (ej. "spotify" → la URI
-    spotify:) y, si no conoce el nombre, intenta abrirlo tal cual (PATH/App Paths).
+    """Abre una aplicación en la Mac de Gonzalo.
 
     Args:
         nombre: Nombre o alias de la app (ej. "spotify", "chrome", "notepad").
@@ -79,44 +69,25 @@ def abrir_app(nombre: str) -> str:
     Returns:
         Mensaje honesto: confirma si abrió, o explica por qué no pudo.
     """
-    clean = (nombre or "").strip()
-    if not clean:
+    app = _mac_app_name(nombre)
+    if app is None:
         return "No me dijiste qué app abrir."
-
-    target = _WINDOWS_APP_TARGETS.get(clean.lower(), clean)
-    is_known = target in _WINDOWS_APP_TARGETS.values()
-    if not is_known and _UNSAFE_CHARS & set(target):
-        return f"Nombre de app no válido: '{nombre}'"
-
-    try:
-        # argv como lista (sin shell=True) → el target no se interpola en un shell.
-        # errors="replace": cmd.exe escribe en la codepage OEM de Windows (no UTF-8);
-        # sin esto, un acento en la salida (ej. warning de UNC) rompe el decode.
-        result = subprocess.run(
-            ["cmd.exe", "/c", "start", "", target],
-            capture_output=True, text=True, errors="replace", timeout=20,
-        )
-    except FileNotFoundError:
-        return "No encuentro cmd.exe — ¿el interop de WSL está deshabilitado?"
-    except subprocess.TimeoutExpired:
-        return f"Timeout abriendo '{nombre}'."
-
+    if platform_info.PLATFORM != platform_info.MACOS:
+        return _unsupported("abrir apps")
+    result = _run(["open", "-a", app], f"abriendo '{nombre}'")
+    if isinstance(result, str):
+        return result
     if result.returncode == 0:
-        return f"Listo, abrí '{nombre}' en Windows."
+        return f"Listo, abrí '{nombre}'."
     err = (result.stderr or result.stdout or "").strip()
     return f"No pude abrir '{nombre}': {err or 'el comando falló'}"
 
 
 def cerrar_app(nombre: str) -> str:
-    """Cierra una aplicación de Windows desde WSL (vía interop con cmd.exe).
+    """Cierra una aplicación abierta en la Mac de Gonzalo.
 
-    Usa `taskkill /IM <proceso>.exe` — mata por nombre de imagen. Resuelve
-    alias comunes (ej. "spotify" → Spotify.exe). Si no conoce el nombre,
-    intenta cerrarlo tal cual (asumiendo que es un .exe).
-
-    Algunos alias mapean a una LISTA de procesos (apps UWP: el launcher
-    se autocierra, el proceso real tiene otro nombre). Se prueba cada uno
-    hasta que uno mata algo.
+    Cierre prolijo (como Cmd+Q) vía AppleScript; si la app no estaba abierta, lo
+    dice en vez de abrirla.
 
     Args:
         nombre: Nombre o alias de la app (ej. "spotify", "chrome", "notepad").
@@ -124,62 +95,29 @@ def cerrar_app(nombre: str) -> str:
     Returns:
         Mensaje honesto: confirma si cerró, o explica por qué no pudo.
     """
-    clean = (nombre or "").strip()
-    if not clean:
+    app = _mac_app_name(nombre)
+    if app is None:
         return "No me dijiste qué app cerrar."
-
-    target = _WINDOWS_KILL_TARGETS.get(clean.lower())
-    if target is None:
-        # Fallback: asumir que es un .exe. Sanitizar anti-inyección.
-        candidate = clean.lower().removesuffix(".exe") + ".exe"
-        if _UNSAFE_CHARS & set(candidate):
-            return f"Nombre de app no válido: '{nombre}'"
-        target = candidate
-
-    # Normalizar a lista: un solo nombre o varios (UWP launcher vs app real).
-    proc_names = target if isinstance(target, list) else [target]
-
-    last_out = ""
-    for proc in proc_names:
-        try:
-            result = subprocess.run(
-                ["cmd.exe", "/c", "taskkill", "/IM", proc, "/F"],
-                capture_output=True, text=True, errors="replace", timeout=20,
-            )
-        except FileNotFoundError:
-            return "No encuentro cmd.exe — ¿el interop de WSL está deshabilitado?"
-        except subprocess.TimeoutExpired:
-            return f"Timeout cerrando '{nombre}'."
-
-        if result.returncode == 0:
-            return f"Listo, cerré '{nombre}' en Windows."
-
-        out = (result.stdout or result.stderr or "").strip().lower()
-        last_out = (result.stdout or result.stderr or "").strip()
-        # "no running task" / "not found" = este proc no está corriendo.
-        # Probar el siguiente de la lista (puede ser un UWP con otro nombre).
-        if "no running task" in out or "not found" in out:
-            continue
-        # Otro error (access denied, etc.) = error real, no reintentes.
-        return f"No pude cerrar '{nombre}': {last_out or 'el comando falló'}"
-
-    # Ningún proceso de la lista estaba corriendo.
-    return f"'{nombre}' no estaba abierta."
-
-
-# Esquemas permitidos para abrir_url. http/https → navegador; spotify: → app.
-# Cerramos la lista a propósito: nada de file:, javascript:, etc.
-_ALLOWED_URL_SCHEMES = ("http://", "https://", "spotify:")
+    if platform_info.PLATFORM != platform_info.MACOS:
+        return _unsupported("cerrar apps")
+    result = _run(["osascript", "-e", _MAC_QUIT_SCRIPT, app], f"cerrando '{nombre}'")
+    if isinstance(result, str):
+        return result
+    out = (result.stdout or "").strip()
+    if result.returncode == 0 and out == "ok":
+        return f"Listo, cerré '{nombre}'."
+    if result.returncode == 0 and out == "not_running":
+        return f"'{nombre}' no estaba abierta."
+    err = (result.stderr or out or "").strip()
+    return f"No pude cerrar '{nombre}': {err or 'el comando falló'}"
 
 
 def abrir_url(url: str) -> str:
-    """Abre una URL en el navegador (o app) por defecto de Windows, desde WSL.
+    """Abre una URL en el navegador (o app) por defecto.
 
-    Usa PowerShell `Start-Process` en vez del bridge `cmd.exe start` por una razón
-    concreta: `cmd.exe` interpreta el `&` de los query params como separador de
-    comandos y PARTE la URL. `Start-Process` la recibe como un argumento entero.
-    Además respeta los handlers de protocolo de Windows: `http/https` abre el
-    navegador, `spotify:` abre la app de Spotify.
+    `open` (macOS) / `xdg-open` (Linux) reciben la URL como UN argumento: el `&`
+    de los query params no se parte. Respetan los handlers de protocolo:
+    `spotify:` abre la app de Spotify.
 
     Args:
         url: URL a abrir. Debe empezar con http://, https:// o spotify:.
@@ -192,28 +130,40 @@ def abrir_url(url: str) -> str:
         return "No me dijiste qué URL abrir."
     if not clean.lower().startswith(_ALLOWED_URL_SCHEMES):
         return f"URL no válida (esperaba http/https/spotify): '{url}'"
-    # Saltos de línea → inyección en el -Command de PowerShell. Se rechazan.
     if "\n" in clean or "\r" in clean:
         return f"URL no válida: '{url}'"
 
-    # La URL viaja dentro de un string single-quoted de PowerShell. Una comilla
-    # simple literal se escapa duplicándola ('') — así no se puede romper el quote.
-    safe = clean.replace("'", "''")
-    try:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-             f"Start-Process '{safe}'"],
-            capture_output=True, text=True, errors="replace", timeout=20,
-        )
-    except FileNotFoundError:
-        return "No encuentro powershell.exe — ¿el interop de WSL está deshabilitado?"
-    except subprocess.TimeoutExpired:
-        return f"Timeout abriendo '{url}'."
-
+    opener = "open" if platform_info.PLATFORM == platform_info.MACOS else "xdg-open"
+    result = _run([opener, clean], f"abriendo '{url}'")
+    if isinstance(result, str):
+        return result
     if result.returncode == 0:
         return f"Listo, abrí '{clean}'."
     err = (result.stderr or result.stdout or "").strip()
     return f"No pude abrir '{url}': {err or 'el comando falló'}"
+
+
+def _mac_app_name(nombre: str) -> str | None:
+    clean = (nombre or "").strip()
+    if not clean:
+        return None
+    return _MAC_APP_TARGETS.get(clean.lower(), clean)
+
+
+def _run(argv: list[str], what: str) -> "subprocess.CompletedProcess[str] | str":
+    """subprocess.run con timeout; devuelve un mensaje (str) si no pudo ejecutar."""
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=20,
+        )
+    except FileNotFoundError:
+        return f"No encuentro `{argv[0]}` en esta máquina."
+    except subprocess.TimeoutExpired:
+        return f"Timeout {what}."
+
+
+def _unsupported(what: str) -> str:
+    return f"Todavía no sé {what} en esta plataforma ({platform_info.PLATFORM})."
 
 
 def buscar_en_google(consulta: str) -> str:
@@ -299,7 +249,7 @@ def info_sistema() -> str:
         Resumen del sistema: OS, CPU, RAM, disco, uptime, red.
     """
     mem = psutil.virtual_memory()
-    disk = psutil.disk_usage("/")
+    disk = psutil.disk_usage(platform_info.disk_path())
     boot = psutil.boot_time()
     uptime_s = psutil.time.time() - boot
     uptime_h = uptime_s / 3600

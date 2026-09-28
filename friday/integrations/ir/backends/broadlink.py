@@ -2,8 +2,8 @@
 
 Requiere la dependencia opcional `broadlink` (pip install broadlink) y la IP del
 emisor en tu red (`ir_broadlink_host`). Conectamos por IP explícita en vez de
-discovery por broadcast: bajo WSL2 el broadcast UDP suele no atravesar el NAT,
-pero el TCP/UDP directo a la IP sí funciona con red mirrored.
+discovery por broadcast: más predecible (el broadcast UDP falla en redes con
+aislamiento de clientes, VPNs o VMs) y el TCP/UDP directo a la IP siempre anda.
 
 Códigos como hex string: el RM entrega/espera bytes crudos; acá los serializamos
 a hex para guardarlos en el registro JSON y reconstruirlos al enviar.

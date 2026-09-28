@@ -63,7 +63,7 @@ class WebSocketBroadcast:
         """Emite un mensaje proactivo para el cliente de voz (Pilar 1).
 
         `text` es la línea hablada (persona, inglés); `speak` indica si además de
-        mostrar el toast hay que decirla en voz. El cliente Windows escucha estos
+        mostrar el toast hay que decirla en voz. El listener de voz escucha estos
         eventos en /ws/live y actúa: toast siempre, voz solo si speak=True.
         """
         await self.send_json({

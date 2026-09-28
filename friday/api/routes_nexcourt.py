@@ -43,7 +43,7 @@ def nexcourt_login(request: Request) -> dict:
     """Lanza el comando de re-login AWS en segundo plano y resetea el cooldown.
 
     Best-effort: abre el navegador para el flujo SSO. Si el navegador no abre solo
-    (WSL sin wslu), el usuario puede correr el comando a mano — el collector retoma
+    (sesión headless), el usuario puede correr el comando a mano — el collector retoma
     igual en cuanto el token vuelve.
     """
     col = _collector(request)

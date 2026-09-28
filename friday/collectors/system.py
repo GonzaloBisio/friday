@@ -6,6 +6,7 @@ import time
 
 import psutil
 
+from friday import platform_info
 from friday.config import settings
 from friday.models import MetricPoint
 
@@ -46,7 +47,7 @@ class SystemCollector(Collector):
         ))
 
         # Disco
-        disk = psutil.disk_usage("/")
+        disk = psutil.disk_usage(platform_info.disk_path())
         points.append(MetricPoint(
             timestamp=now, source=self.source, name="disk_percent",
             value=disk.percent, unit="%",

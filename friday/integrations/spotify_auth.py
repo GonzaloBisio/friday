@@ -5,9 +5,8 @@ queda en `.spotify_token.json`. Solo hace falta una vez (salvo que revoques el
 acceso desde tu cuenta de Spotify).
 
 El callback (http://127.0.0.1:8888/callback) lo atiende un mini servidor HTTP
-acá en WSL. Funciona porque WSL2 espeja localhost: el navegador de Windows que
-pega a 127.0.0.1:8888 llega a este listener. (Mismo motivo por el que todo el
-puente WSL↔Windows usa 127.0.0.1 y no "localhost".)
+en esta misma máquina: el navegador pega a 127.0.0.1:8888 y llega a este
+listener. (127.0.0.1 y no "localhost": evita el intento IPv6 (::1) primero.)
 """
 
 from __future__ import annotations

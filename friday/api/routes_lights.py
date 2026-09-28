@@ -1,6 +1,6 @@
 """Rutas REST de luces / control IR.
 
-El listener de voz (script standalone en Windows) NO importa el paquete friday:
+El listener de voz (friday/voice/wake.py) NO importa el resto del paquete friday:
 habla con el cerebro solo por HTTP. Así que el estado de voz para las luces se
 empuja por acá, igual que /chat.
 
