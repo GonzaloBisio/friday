@@ -28,30 +28,70 @@ class Settings(BaseSettings):
     # 127.0.0.1 (no "localhost") para forzar IPv4: con localhost, httpx intenta
     # IPv6 (::1) primero, donde Ollama no escucha, y suma ~21s de timeout.
     ollama_host: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen2.5:7b"
+    # Gemma 4 E4B QAT (6.1GB): tools nativas, 128K ctx, entra holgado en 16GB junto
+    # con Whisper + TTS. Si te sobra RAM: "gemma4:12b-it-qat" (7.2GB, razona mejor).
+    # Ver docs/MODELS.md para la matriz completa.
+    ollama_model: str = "gemma4:e4b-it-qat"
     ollama_timeout_seconds: float = 120.0
+    # Ventana de contexto EXPLÍCITA. Sin esto Ollama usa su default (2-4K) y, con
+    # ~2.6K tokens fijos (system + 27 tools) + memoria + historial, RECORTA EL
+    # PRINCIPIO del prompt — o sea el system prompt — sin avisar.
+    ollama_num_ctx: int = 8192
+    # Gemma 4 (y otros "thinking models") PIENSAN por defecto y el razonamiento se
+    # come num_predict → content vacío ("(sin respuesta)"). Medido en el M4:
+    # think=on → 12.8s y vacío; think=false → 0.4s y correcto. Para voz: False.
+    # None = no mandar el parámetro (modelos sin soporte de thinking).
+    ollama_think: bool | None = False
 
     # --- Gemini ---
     gemini_api_key: str = ""
-    # 2.5-flash: el modelo por defecto. (2.0-flash fue dado de baja por Google en
-    # 2026-06 → devolvía 404). Confiable con tools (apertura de apps, análisis),
-    # rápido y barato ($0.30/$2.50 por 1M). Verificado en vivo contra la API.
-    gemini_model_fast: str = "gemini-2.5-flash"
-    # Escalón intermedio para consultas complejas del clasificador AUTO. 2.5-flash
-    # razona mejor que 2.0 sin el free tier ínfimo de 2.5-pro. NUNCA mandamos auto
-    # a pro: reventaba la cuota (429) con cualquier mensaje largo.
-    gemini_model_balanced: str = "gemini-2.5-flash"
-    # 2.5-pro queda reservado SOLO para pedido explícito (chat model="pro").
-    gemini_model_reasoning: str = "gemini-2.5-pro"
+    # 2026-09: la familia 2.5 quedó "access limited" y 2.0 fue apagada (404). Los
+    # 3.x SIEMPRE piensan (no hay thinking off) y el thinking cuenta dentro de
+    # max_output_tokens → ver gemini_thinking_levels y gemini_max_output_tokens.
+    # Matriz completa y precios en docs/MODELS.md.
+    #
+    # fast: turnos de voz con tools (~80% del tráfico). 3.5-flash-lite cuesta LO
+    # MISMO que el viejo 2.5-flash ($0.30/$2.50 por 1M) → respeta el tope mensual.
+    # Modo calidad: "gemini-3.6-flash" (thinking "minimal", 2.5x el precio).
+    gemini_model_fast: str = "gemini-3.5-flash-lite"
+    # balanced: consultas largas/complejas del clasificador AUTO. NUNCA mandamos
+    # auto a pro (sin free tier + caro); pro solo bajo pedido explícito.
+    # $0.75/$3.75 por 1M (promo hasta 2026-12-31; después se duplica).
+    gemini_model_balanced: str = "gemini-3.8-flash"
+    # lite: redacción one-shot sin tools (briefings, compose). El más barato con
+    # buena calidad: $0.30/$2.50 por 1M.
+    gemini_model_lite: str = "gemini-3.5-flash-lite"
+    # reasoning: SOLO pedido explícito (chat model="pro"). Preview y SIN free tier.
+    gemini_model_reasoning: str = "gemini-3.1-pro-preview"
+    # thinking_level por modelo (3.x). Lo no listado usa el default del modelo.
+    gemini_thinking_levels: dict = Field(default_factory=lambda: {
+        "gemini-3.6-flash": "minimal",
+        "gemini-3.8-flash": "low",
+        "gemini-3.5-flash-lite": "low",
+    })
+    # Techo de salida (thinking + respuesta). 200 alcanzaba con 2.5 + budget=0, pero
+    # en 3.x el pensar se come el techo y la respuesta sale vacía. La brevedad para
+    # voz la impone el system prompt ("two sentences"), no este número.
+    gemini_max_output_tokens: int = 1024
 
     # Pricing por MODELO (USD per 1K tokens). El tracker acumula tokens por modelo
     # y el collector aplica el precio de cada uno → costo real cuando convive flash
     # con pro. Esta tabla NO se sobreescribe desde .env (haría falta un JSON), así
     # que el costo queda correcto aunque el .env tenga viejos escalares.
+    # Precios verificados en ai.google.dev/gemini-api/docs/pricing (2026-09). Los
+    # 3.6/3.7/3.8-flash tienen precio promo hasta 2026-12-31 (después se duplica).
     gemini_pricing: dict = Field(default_factory=lambda: {
-        "gemini-2.0-flash": {"in": 0.0001,  "out": 0.0004},   # $0.10 / $0.40 por 1M
-        "gemini-2.5-flash": {"in": 0.0003,  "out": 0.0025},   # $0.30 / $2.50 por 1M
-        "gemini-2.5-pro":   {"in": 0.00125, "out": 0.01},     # $1.25 / $10 por 1M
+        "gemini-3.8-flash":       {"in": 0.00075, "out": 0.00375},  # $0.75 / $3.75
+        "gemini-3.7-flash":       {"in": 0.00075, "out": 0.00375},
+        "gemini-3.6-flash":       {"in": 0.00075, "out": 0.00375},
+        "gemini-3.5-flash":       {"in": 0.0015,  "out": 0.009},    # $1.50 / $9
+        "gemini-3.5-flash-lite":  {"in": 0.0003,  "out": 0.0025},   # $0.30 / $2.50
+        "gemini-3.1-flash-lite":  {"in": 0.00025, "out": 0.0015},   # $0.25 / $1.50
+        "gemini-3.1-pro-preview": {"in": 0.002,   "out": 0.012},    # $2 / $12 (≤200K)
+        # Legacy (sesiones viejas en la DB): mantener para que el costo histórico cuadre.
+        "gemini-2.0-flash": {"in": 0.0001,  "out": 0.0004},
+        "gemini-2.5-flash": {"in": 0.0003,  "out": 0.0025},
+        "gemini-2.5-pro":   {"in": 0.00125, "out": 0.01},
     })
 
     # Fallback escalar para modelos fuera de la tabla (modelo desconocido). OJO: si
@@ -159,6 +199,11 @@ class Settings(BaseSettings):
     # Memorias de Gonzalo inyectadas al system prompt cada turno. Acotado para no
     # inflar el prompt; ranking por relevancia (top-K real) queda para Fase 2.
     memory_context_limit: int = 30
+    # Resultados de tools de TURNOS ANTERIORES que siguen en el historial se recortan
+    # a este largo (chars). Sin esto, un leer_pagina (6K chars) o metricas_servicio
+    # (~15K chars) se reenvía en CADA llamada durante los próximos 12 turnos. El
+    # turno en curso siempre ve el resultado completo. 0 = no recortar.
+    tool_result_history_chars: int = 600
 
     # --- Storage ---
     db_path: str = str(_PROJECT_ROOT / "friday.db")
@@ -183,6 +228,17 @@ class Settings(BaseSettings):
         {"name": "Backend innovador", "query": "innovative backend development techniques distributed systems 2026"},
         {"name": "Arquitectura & Tooling", "query": "new backend architecture patterns developer tools release"},
     ])
+
+    # --- API ---
+    # 127.0.0.1 por defecto: el agente abre apps y LEE ARCHIVOS sin confirmación
+    # (RiskLevel.LOW) y la API no tiene auth. En 0.0.0.0, cualquiera en tu Wi-Fi
+    # podría pedir leer_archivo(~/.ssh/...). Solo abrilo si sabés lo que hacés.
+    api_host: str = "127.0.0.1"
+
+    # --- Voz (listener) ---
+    # Carpeta con modelos de voz (Vosk, Piper, jarvis.wav) y el log del listener.
+    # Vacío = default por plataforma (ver friday/voice/wake.py: _default_voices_dir).
+    voices_dir: str = ""
 
     # --- System collector ---
     system_poll_interval_seconds: int = 10

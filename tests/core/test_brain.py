@@ -185,7 +185,7 @@ class TestAdaptiveModel:
     def test_explicit_pro_model(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
         result = brain.chat("explícame la teoría de la relatividad", model="pro")
-        assert result.model == "gemini-2.5-pro"
+        assert result.model == settings.gemini_model_reasoning
 
     def test_auto_classifies_short_metric_query_as_flash(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("42%")
@@ -199,7 +199,7 @@ class TestAdaptiveModel:
         long_msg = "Necesito que analices " + "el rendimiento del sistema " * 10
         result = brain.chat(long_msg)
         assert result.model == settings.gemini_model_balanced
-        assert result.model != "gemini-2.5-pro"
+        assert result.model != settings.gemini_model_reasoning
 
     def test_auto_defaults_to_flash(self, brain):
         brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
@@ -338,3 +338,51 @@ class TestExtractText:
         content = MagicMock()
         content.parts = None
         assert _extract_text(content) == "(sin respuesta)"
+
+
+class TestThinkingConfig:
+    """3.x no permite apagar el thinking: se usa thinking_level; 2.x usa budget."""
+
+    def test_gemini3_uses_thinking_level(self, brain, monkeypatch):
+        monkeypatch.setattr(settings, "gemini_thinking_levels", {"gemini-3.6-flash": "minimal"})
+        cfg = brain._thinking_for("gemini-3.6-flash")
+        assert cfg.thinking_level.value == "MINIMAL"
+        assert cfg.thinking_budget is None
+
+    def test_gemini3_unlisted_uses_model_default(self, brain, monkeypatch):
+        monkeypatch.setattr(settings, "gemini_thinking_levels", {})
+        assert brain._thinking_for("gemini-3.8-flash") is None
+
+    def test_legacy_flash_disables_thinking_with_budget(self, brain):
+        cfg = brain._thinking_for("gemini-2.5-flash")
+        assert cfg.thinking_budget == 0
+
+
+class TestStablePrefix:
+    """El system prompt no debe cambiar minuto a minuto (cache implícito)."""
+
+    def test_system_instruction_has_no_clock_time(self, brain):
+        import re
+        instr = brain._build_system_instruction()
+        assert not re.search(r"\d{2}:\d{2}", instr)
+        assert "Today is" in instr
+
+    def test_user_message_carries_time_note(self, brain):
+        brain._mock_client.models.generate_content.return_value = _make_text_response("ok")
+        brain.chat("hola")
+        first = brain.history[0]
+        assert first.parts[0].text.startswith("hola\n\n[local time ")
+
+    def test_old_function_responses_are_compacted(self, brain, monkeypatch):
+        from google.genai import types
+        monkeypatch.setattr(settings, "tool_result_history_chars", 40)
+        brain._history = [
+            types.Content(role="user", parts=[types.Part(text="leé")]),
+            types.Content(role="user", parts=[types.Part(
+                function_response=types.FunctionResponse(
+                    name="leer_pagina", response={"result": "y" * 3000}),
+            )]),
+        ]
+        brain._compact_old_tool_results()
+        result = brain._history[1].parts[0].function_response.response["result"]
+        assert len(result) < 150 and "recortado" in result

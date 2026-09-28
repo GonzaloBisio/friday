@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import httpx
 import respx
 
+from friday.config import settings
 from friday.core.llm_base import ChatResult
 from friday.core.ollama_brain import OllamaBrain
 
@@ -55,7 +56,14 @@ def test_chat_sends_system_prompt_and_no_streaming():
     assert sent["model"] == "qwen2.5:7b"
     assert sent["messages"][0]["role"] == "system"
     assert "FRIDAY" in sent["messages"][0]["content"]
-    assert sent["messages"][-1] == {"role": "user", "content": "¿cuánta RAM tengo?"}
+    last = sent["messages"][-1]
+    assert last["role"] == "user"
+    # La hora viaja en el mensaje (prefijo estable → KV-cache), no en el system.
+    assert last["content"].startswith("¿cuánta RAM tengo?\n\n[local time ")
+    assert "local time" not in sent["messages"][0]["content"]
+    assert sent["options"]["num_ctx"] == settings.ollama_num_ctx
+    # Thinking apagado: si no, Gemma 4 gasta num_predict pensando y responde vacío.
+    assert sent["think"] is False
 
 
 # ── Error / offline ────────────────────────────────────────────────────────
@@ -296,3 +304,28 @@ def test_chat_tool_execution_error_is_reported_to_model():
     tool_msg = brain.history[2]
     assert tool_msg["role"] == "tool"
     assert "falló la tool" in tool_msg["content"]
+
+
+def test_old_tool_results_are_compacted_on_next_turn(monkeypatch):
+    """Un resultado de tool de un turno previo no se reenvía entero para siempre."""
+    monkeypatch.setattr(settings, "tool_result_history_chars", 50)
+    brain = OllamaBrain(host=HOST, model="qwen2.5:7b")
+    brain._history = [
+        {"role": "user", "content": "leé la página"},
+        {"role": "assistant", "content": "", "tool_calls": [{}]},
+        {"role": "tool", "content": "x" * 5000},
+        {"role": "assistant", "content": "Resumen, sir."},
+    ]
+    brain._compact_old_tool_results()
+    tool_msg = brain._history[2]["content"]
+    assert len(tool_msg) < 200
+    assert "recortado" in tool_msg
+
+
+def test_think_param_omitted_when_none(monkeypatch):
+    monkeypatch.setattr(settings, "ollama_think", None)
+    with respx.mock:
+        route = respx.post(f"{HOST}/api/chat").mock(
+            return_value=httpx.Response(200, json={"message": {"content": "ok"}}))
+        OllamaBrain(host=HOST, model="qwen2.5:7b").chat("hola")
+    assert "think" not in json.loads(route.calls.last.request.content)

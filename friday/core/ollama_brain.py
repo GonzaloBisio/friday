@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
 from typing import Any
 
 import httpx
 
 from friday.config import settings
 from friday.core.activity import activity_log, format_args
+from friday.core.context_window import compact_tool_result, day_stamp, with_time_note
 from friday.core.health import health_tracker
 from friday.core.llm_base import FRIDAY_SYSTEM_PROMPT, ChatResult
 from friday.storage.chat_repo import ChatMessage, ChatRepository
@@ -77,7 +77,10 @@ class OllamaBrain:
         ejecuta tools pedidas por el modelo y reintenta hasta obtener
         una respuesta final (o MAX_TOOL_ROUNDS).
         """
-        self._history.append({"role": "user", "content": user_message})
+        self._compact_old_tool_results()
+        # Hora en el mensaje (no en el system prompt) → prefijo estable → Ollama
+        # reusa el KV-cache de system+tools en vez de re-procesar ~2.6K tokens.
+        self._history.append({"role": "user", "content": with_time_note(user_message)})
         # Acota el historial: el brain es singleton, sin esto el contexto crece sin techo.
         self._trim_history()
         self._save_message("user", user_message, model=self._model)
@@ -162,22 +165,33 @@ class OllamaBrain:
         redactan con el LLM sin tocar `self._history` ni persistir. Propaga
         httpx.HTTPError si Ollama no responde: el caller decide el fallback.
         """
-        now = datetime.now().strftime("%A %d %B %Y, %H:%M")
         messages = [
-            {"role": "system", "content": f"{self._system_prompt}\n\nCurrent date/time: {now}."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": f"{self._system_prompt}\n\nToday is {day_stamp()}."},
+            {"role": "user", "content": with_time_note(prompt)},
         ]
         body = {
             "model": model or self._model,
             "messages": messages,
             "stream": False,
             "keep_alive": "30m",
-            "options": {"num_predict": 220, "temperature": 0.7},
+            "options": {
+                "num_predict": 220, "temperature": 0.7,
+                "num_ctx": settings.ollama_num_ctx,
+            },
         }
+        if settings.ollama_think is not None:
+            body["think"] = settings.ollama_think
         resp = httpx.post(f"{self._host}/api/chat", json=body, timeout=self._timeout)
         resp.raise_for_status()
         data = resp.json()
         return (data.get("message", {}).get("content") or "").strip() or "(sin respuesta)"
+
+    def _compact_old_tool_results(self) -> None:
+        """Recorta resultados de tools de turnos previos (ver context_window)."""
+        limit = settings.tool_result_history_chars
+        for msg in self._history:
+            if msg.get("role") == "tool" and isinstance(msg.get("content"), str):
+                msg["content"] = compact_tool_result(msg["content"], limit)
 
     def _trim_history(self) -> None:
         """Mantiene solo los últimos N turnos en memoria para acotar tokens.
@@ -230,8 +244,8 @@ class OllamaBrain:
 
     def _build_messages(self) -> list[dict[str, Any]]:
         """Construye la lista de mensajes con fecha/hora (y memoria) en el system prompt."""
-        now = datetime.now().strftime("%A %d %B %Y, %H:%M")
-        dated_prompt = f"{self._system_prompt}\n\nCurrent date/time: {now}."
+        # Solo la fecha: el prefijo system+tools tiene que ser estable (KV-cache).
+        dated_prompt = f"{self._system_prompt}\n\nToday is {day_stamp()}."
         dated_prompt += self._memory_block()
         return [{"role": "system", "content": dated_prompt}, *self._history]
 
@@ -270,10 +284,16 @@ class OllamaBrain:
             # num_predict: techo de tokens. 150 da 2-3 frases completas sin cortar
             # la respuesta a la mitad (80 las clipeaba). temperature 0.8 le da chispa
             # conversacional sin desbocarse.
-            "options": {"num_predict": 150, "temperature": 0.8},
+            "options": {
+                "num_predict": 150, "temperature": 0.8,
+                # Explícito: el default de Ollama recorta el system prompt (ver config).
+                "num_ctx": settings.ollama_num_ctx,
+            },
         }
         if tools:
             body["tools"] = tools
+        if settings.ollama_think is not None:
+            body["think"] = settings.ollama_think
 
         resp = httpx.post(
             f"{self._host}/api/chat",

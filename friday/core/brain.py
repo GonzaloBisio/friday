@@ -1,8 +1,9 @@
 """Cliente Gemini con function calling — el cerebro de FRIDAY.
 
 Soporta:
-- Modelo adaptativo: gemini-2.5-flash para consultas simples,
-  gemini-2.5-pro para razonamiento complejo.
+- Modelo adaptativo: fast (voz + tools), balanced (consultas largas), lite
+  (compose one-shot) y reasoning (solo pedido explícito). IDs en config.py.
+- Prefijo estable para el cache implícito de Gemini (ver context_window.py).
 - Persistencia de conversaciones via ChatRepository.
 """
 
@@ -10,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
 from typing import Any
 
 from google import genai
@@ -20,6 +20,11 @@ from google.genai import types
 from friday.collectors.gemini_usage import GeminiTracker, gemini_tracker
 from friday.config import settings
 from friday.core.activity import activity_log, format_args
+from friday.core.context_window import (
+    compact_tool_result,
+    day_stamp,
+    with_time_note,
+)
 from friday.core.health import health_tracker
 from friday.core.llm_base import FRIDAY_SYSTEM_PROMPT, ChatResult
 from friday.core.tools_registry import ToolsRegistry
@@ -89,8 +94,13 @@ class FridayBrain:
             ChatResult con respuesta, modelo usado y tokens.
         """
         selected_model = self._select_model(user_message, model)
+        # Resultados de tools de turnos previos → recortados (una sola vez: después
+        # el prefijo queda estable y cacheable). El turno nuevo los ve completos.
+        self._compact_old_tool_results()
+        # La hora viaja en el mensaje (no en el system prompt) para que el prefijo
+        # system+tools sea idéntico entre llamadas → cache implícito de Gemini.
         self._history.append(
-            types.Content(role="user", parts=[types.Part(text=user_message)])
+            types.Content(role="user", parts=[types.Part(text=with_time_note(user_message))])
         )
         # Acota el historial en memoria antes de llamar al modelo: el brain es un
         # singleton y sin esto el input crece sin techo turno a turno.
@@ -203,6 +213,27 @@ class FridayBrain:
         )
         return result
 
+    def _compact_old_tool_results(self) -> None:
+        """Recorta los function_response ya consumidos por el modelo.
+
+        Se llama al empezar un turno: todo lo que hay en el historial pertenece a
+        turnos ANTERIORES, cuyo resultado el modelo ya leyó y resumió en su
+        respuesta. Mantener 6K chars de una página por 12 turnos es puro costo.
+        """
+        limit = settings.tool_result_history_chars
+        if limit <= 0:
+            return
+        for content in self._history:
+            for part in content.parts or []:
+                fr = getattr(part, "function_response", None)
+                if fr is None or not isinstance(fr.response, dict):
+                    continue
+                result = fr.response.get("result")
+                if isinstance(result, str):
+                    compacted = compact_tool_result(result, limit)
+                    if compacted is not result:
+                        fr.response = {**fr.response, "result": compacted}
+
     def _trim_history(self) -> None:
         """Mantiene solo los últimos N turnos en memoria para acotar tokens.
 
@@ -302,15 +333,12 @@ class FridayBrain:
         Propaga errores (incluido 429): el caller decide el fallback —un briefing
         tiene su propio piso de plantilla determinista—.
         """
-        used_model = model or self._default_model
+        # Sin tools ni historial → alcanza el modelo lite (el más barato).
+        used_model = model or settings.gemini_model_lite
         config = types.GenerateContentConfig(
             system_instruction=self._build_system_instruction(),
-            # Un poco más de aire que el chat de voz (200): un briefing puede
-            # encadenar un par de frases con varios datos.
-            max_output_tokens=220,
+            max_output_tokens=settings.gemini_max_output_tokens,
             temperature=0.7,
-            # Sin thinking en flash: si no, los thought tokens vacían los 220 y el
-            # briefing sale vacío (cae a su plantilla). Ver _call_gemini.
             thinking_config=self._thinking_for(used_model),
         )
         response = self._client.models.generate_content(
@@ -338,14 +366,10 @@ class FridayBrain:
             # Manejamos las tools en el loop manual (con logging y gate), no que el
             # SDK las ejecute solo — así controlamos qué corre y lo registramos.
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            # Techo duro: respuestas de voz cortas (evita el TTS eterno y el truncado
-            # de Pocket TTS). ~2 frases entran holgadas en 200 tokens.
-            max_output_tokens=200,
+            # Techo = thinking + respuesta. La brevedad de voz la impone el prompt;
+            # un techo bajo (200) dejaba la respuesta vacía en 3.x (ver config).
+            max_output_tokens=settings.gemini_max_output_tokens,
             temperature=0.7,
-            # CRÍTICO con 2.5-flash: trae "thinking" ON por defecto y esos tokens
-            # SE COMEN el max_output_tokens → la respuesta sale vacía ("(sin
-            # respuesta)"), sobre todo en el tool-loop. Lo apagamos en flash; en pro
-            # (reasoning) lo dejamos porque ahí el pensar es el punto.
             thinking_config=self._thinking_for(model),
         )
 
@@ -359,21 +383,30 @@ class FridayBrain:
         return response
 
     def _thinking_for(self, model: str) -> "types.ThinkingConfig | None":
-        """Apaga el thinking en flash; lo deja (default del SDK) en pro.
+        """Config de thinking según la familia del modelo.
 
-        2.5-flash trae thinking ON y sus thought tokens consumen el
-        max_output_tokens → la respuesta sale vacía. budget=0 lo desactiva
-        (más barato y rápido). 2.5-pro no admite budget=0 y se beneficia de
-        pensar, así que ahí devolvemos None.
+        - 3.x: no se puede apagar; se usa `thinking_level` (minimal/low/...) de
+          settings.gemini_thinking_levels. Sin entrada → default del modelo.
+        - 2.x (legacy): budget=0 en flash (si no, el pensar vaciaba la respuesta);
+          None en el modelo de reasoning.
         """
-        if model == self._reasoning_model:
+        if model.startswith("gemini-2"):
+            if model == self._reasoning_model or "pro" in model:
+                return None
+            return types.ThinkingConfig(thinking_budget=0)
+        level = settings.gemini_thinking_levels.get(model)
+        if not level:
             return None
-        return types.ThinkingConfig(thinking_budget=0)
+        return types.ThinkingConfig(thinking_level=level.upper())
 
     def _build_system_instruction(self) -> str:
-        """System prompt + fecha/hora + memoria de Gonzalo (igual que OllamaBrain)."""
-        now = datetime.now().strftime("%A %d %B %Y, %H:%M")
-        prompt = f"{self._system_prompt}\n\nCurrent date/time: {now}."
+        """System prompt + FECHA (no hora) + memoria de Gonzalo.
+
+        Todo lo de acá debe ser estable entre llamadas: es el prefijo que Gemini
+        cachea implícitamente (90% off). La hora exacta va en cada mensaje de
+        usuario (with_time_note); la fecha cambia una vez por día.
+        """
+        prompt = f"{self._system_prompt}\n\nToday is {day_stamp()}."
         return prompt + self._memory_block()
 
     def _memory_block(self) -> str:
