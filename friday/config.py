@@ -102,10 +102,11 @@ class Settings(BaseSettings):
 
     # --- NEXCOURT ---
     # Modo de acceso:
+    #   "off"        → desactivado (default, no hace polling cada 30s)
     #   "direct"     → management ports 9081-9087 (docker-compose local)
     #   "kong"       → via gateway (/health/{service})
     #   "cloudwatch" → AWS ECS + CloudWatch (producción, read-only). Ver collectors/cloudwatch.py
-    nexcourt_mode: str = "direct"
+    nexcourt_mode: str = "off"
 
     # Modo "direct": URL base para health (ej. http://localhost)
     nexcourt_direct_host: str = "http://localhost"
@@ -241,7 +242,7 @@ class Settings(BaseSettings):
     voices_dir: str = ""
     # Voz del catálogo de Pocket TTS (sin login) si no hay voices/jarvis.wav para
     # clonar. Escuchá las opciones en voices/samples/*.wav. Env: TTS_VOICE.
-    tts_voice: str = "charles"
+    tts_voice: str = "michael"
 
     # --- System collector ---
     system_poll_interval_seconds: int = 10

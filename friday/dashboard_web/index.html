@@ -311,7 +311,7 @@
     wsState: 'connecting', coreMode: 'idle',
     cpu: 0, ram: 0, disk: 0,
     health: null,
-    nexcourt: [], axis: [], nexcourtLogin: false, loginPending: false,
+    nexcourt: [], axis: [], nexcourtLogin: false, loginPending: false, nexcourtDisabled: false,
     voiceState: 'idle', voiceLines: [],
     activity: [], notifications: [], toasts: [],
     cost: 0, chatCount: 0,
@@ -324,6 +324,38 @@
   var ws = null, pingTimer = null, reTimer = null, reconnectDelay = 1000, nid = 0;
   var demoOn = false, demoTimers = [], demoIdx = 0, demoFallback = null;
   var pollTimers = [];
+
+  // ── Pausar polling cuando la pestaña no es visible ────────────────
+  var pageVisible = true, lastDataCache = {};
+  var POLL_INTERVALS = {
+    health: 5000,
+    activity: 3000,
+    status: 10000,
+    infra: 10000,
+    voice: 3000,
+    gastos: 300000,
+    research: 600000,
+  };
+
+  function pausePolling() {
+    pageVisible = false;
+    // Parar todos los timers y guardar su naturaleza para reanudar después
+    pollTimers.forEach(clearInterval);
+  }
+
+  function resumePolling() {
+    pageVisible = true;
+    pollTimers = [];
+    startPolling();  // ya hace el refresco inmediato de todo antes de armar los timers
+  }
+
+  function updateDataCache(key, newData) {
+    var newStr = JSON.stringify(newData);
+    var oldStr = lastDataCache[key];
+    var changed = oldStr !== newStr;
+    if (changed) lastDataCache[key] = newStr;
+    return changed;
+  }
 
   // ── helpers ──────────────────────────────────────────────────────────────
   function $(id) { return document.getElementById(id); }
@@ -367,6 +399,9 @@
         reconnectDelay = 1000;
         setState({ wsState: 'live' });
         stopDemo();
+        // Historial UNA vez por conexión (abrir y cada reconexión): recupera lo que
+        // llegó mientras el socket estaba caído. Lo nuevo entra por onProactive.
+        loadNotifications();
         clearInterval(pingTimer);
         // keepalive: el server responde "pong" (mismo patrón que el cliente de voz).
         pingTimer = setInterval(function () {
@@ -442,15 +477,21 @@
 
   // ── REST polling ─────────────────────────────────────────────────────────
   function startPolling() {
-    pollHealth(); pollActivity(); pollNotifications(); pollStatus(); pollInfra(); pollVoice(); pollRoutines(); pollGastos(); pollResearch();
-    pollTimers.push(setInterval(pollHealth, 5000));
-    pollTimers.push(setInterval(pollGastos, 300000));  // los gastos cambian lento (Google Sheet)
-    pollTimers.push(setInterval(pollResearch, 600000)); // el digest cambia 1 vez/día
-    pollTimers.push(setInterval(pollActivity, 2000));
-    pollTimers.push(setInterval(pollNotifications, 10000));
-    pollTimers.push(setInterval(pollStatus, 10000));
-    pollTimers.push(setInterval(pollInfra, 10000));
-    pollTimers.push(setInterval(pollVoice, 3000));
+    if (!pageVisible) return;  // no iniciar si la pestaña no es visible
+
+    // Llamadas iniciales inmediatas
+    pollHealth(); pollActivity(); pollStatus(); pollInfra(); pollVoice();
+    pollRoutines(); pollGastos(); pollResearch();
+
+    // Los timers respetan POLL_INTERVALS y verifican visibilidad
+    pollTimers.push(setInterval(function () { if (pageVisible) pollHealth(); }, POLL_INTERVALS.health));
+    pollTimers.push(setInterval(function () { if (pageVisible) pollActivity(); }, POLL_INTERVALS.activity));
+    pollTimers.push(setInterval(function () { if (pageVisible) pollStatus(); }, POLL_INTERVALS.status));
+    pollTimers.push(setInterval(function () { if (pageVisible) pollInfra(); }, POLL_INTERVALS.infra));
+    pollTimers.push(setInterval(function () { if (pageVisible) pollVoice(); }, POLL_INTERVALS.voice));
+    pollTimers.push(setInterval(function () { if (pageVisible) pollGastos(); }, POLL_INTERVALS.gastos));
+    pollTimers.push(setInterval(function () { if (pageVisible) pollResearch(); }, POLL_INTERVALS.research));
+    // Las notificaciones ahora vienen por WebSocket; no hay polling
   }
   // Reduce puntos de /api/metrics (orden ts DESC) → último valor por servicio.
   function reduceLatest(points) {
@@ -465,7 +506,7 @@
   }
   function pollHealth() {
     fetch(REST + '/api/health').then(function (r) { return r.json(); }).then(function (d) {
-      if (d) setState({ health: d });
+      if (d && updateDataCache('health', d)) setState({ health: d });
     }).catch(function () {});
   }
   function pollActivity() {
@@ -473,29 +514,55 @@
       // El endpoint devuelve {events:[...]} en orden cronológico (viejo→nuevo).
       // El feed muestra lo más nuevo arriba, así que invertimos.
       var list = Array.isArray(d) ? d : (d && Array.isArray(d.events) ? d.events : null);
-      if (list) setState({ activity: list.slice().reverse().slice(0, 12) });
+      if (list) {
+        var activity = list.slice().reverse().slice(0, 12);
+        if (updateDataCache('activity', activity)) setState({ activity: activity });
+      }
     }).catch(function () {});
   }
-  function pollNotifications() {
+  // Notificaciones: sin polling. Historial al conectar el WS (loadNotifications) y
+  // lo nuevo en vivo por /ws/live (onProactive).
+  function loadNotifications() {
     fetch(REST + '/api/notifications').then(function (r) { return r.json(); }).then(function (d) {
-      if (Array.isArray(d)) setState({ notifications: d.slice(0, 8) });
+      if (Array.isArray(d) && updateDataCache('notifications', d)) {
+        setState({ notifications: d.slice(0, 8) });
+      }
     }).catch(function () {});
   }
+
   function pollStatus() {
     // /api/status trae el costo agregado (el WS lo refresca en vivo; esto es el piso).
+    // También detecta si NEXCOURT está desactivado.
     fetch(REST + '/api/status').then(function (r) { return r.json(); }).then(function (d) {
-      if (d && d.gemini && d.gemini.cost_usd != null) setState({ cost: Number(d.gemini.cost_usd) || 0 });
+      var updates = {};
+      if (d && d.gemini && d.gemini.cost_usd != null) {
+        var cost = Number(d.gemini.cost_usd) || 0;
+        if (updateDataCache('cost', cost)) updates.cost = cost;
+      }
+      // Detectar si NEXCOURT está desactivado
+      if (d && d.services && Array.isArray(d.services)) {
+        var nexcourtSvc = d.services.find(function (s) { return s.name === 'NEXCOURT Collector'; });
+        var disabled = nexcourtSvc && nexcourtSvc.status === 'disabled';
+        if (updateDataCache('nexcourtDisabled', disabled)) updates.nexcourtDisabled = disabled;
+      }
+      if (Object.keys(updates).length > 0) setState(updates);
     }).catch(function () {});
   }
   function pollInfra() {
     fetch(REST + '/api/metrics?source=nexcourt&hours=1&limit=800').then(function (r) { return r.json(); }).then(function (d) {
-      if (d && Array.isArray(d.points)) setState({ nexcourt: reduceLatest(d.points) });
+      if (d && Array.isArray(d.points)) {
+        var nc = reduceLatest(d.points);
+        if (updateDataCache('nexcourt', nc)) setState({ nexcourt: nc });
+      }
     }).catch(function () {});
     fetch(REST + '/api/metrics?source=axis&hours=1&limit=800').then(function (r) { return r.json(); }).then(function (d) {
-      if (d && Array.isArray(d.points)) setState({ axis: reduceLatest(d.points) });
+      if (d && Array.isArray(d.points)) {
+        var ax = reduceLatest(d.points);
+        if (updateDataCache('axis', ax)) setState({ axis: ax });
+      }
     }).catch(function () {});
     fetch(REST + '/api/nexcourt/auth').then(function (r) { return r.json(); }).then(function (d) {
-      if (d) setState({ nexcourtLogin: !!d.needs_login });
+      if (d && updateDataCache('nexcourtLogin', !!d.needs_login)) setState({ nexcourtLogin: !!d.needs_login });
     }).catch(function () {});
   }
   function setView(v) {
@@ -741,14 +808,18 @@
     var el = $(id), cnt = $(id + '-count');
     if (list.length) {
       var up = list.filter(function (s) { return s.status === 1 || s.health === 'UP' || s.health === 'healthy'; }).length;
-      if (cnt) cnt.textContent = up + '/' + list.length + ' UP';
-      el.innerHTML = list.map(function (s) { return infraRow(s, withTasks); }).join('');
+      if (cnt) cnt.__setText = up + '/' + list.length + ' UP';
+      el.__setHTML = list.map(function (s) { return infraRow(s, withTasks); }).join('');
     } else {
-      if (cnt) cnt.textContent = '';
-      el.innerHTML = emptyHTML || '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;text-align:center;">Sin datos — collector offline o sin credenciales.</div>';
+      if (cnt) cnt.__setText = '';
+      el.__setHTML = emptyHTML || '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;text-align:center;">Sin datos — collector offline o sin credenciales.</div>';
     }
   }
   function nexcourtEmptyHTML() {
+    // NEXCOURT está desactivado (modo "off")
+    if (state.nexcourtDisabled) {
+      return '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;text-align:center;">NEXCOURT desactivado (nexcourt_mode="off")</div>';
+    }
     if (!state.nexcourtLogin) return null;  // sin auth pendiente → mensaje genérico
     var btn = state.loginPending
       ? '<button data-action="aws-login" disabled style="opacity:.6;cursor:default;font-family:Rajdhani,sans-serif;font-size:12px;letter-spacing:1.5px;font-weight:600;color:#05080d;background:#22d3ee;border:none;border-radius:6px;padding:8px 18px;">ABRIENDO LOGIN…</button>'
@@ -759,6 +830,28 @@
     return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:12px;">' + hint + btn + '</div>';
   }
 
+  // Escrituras al DOM SOLO si cambió el contenido. render() corre en cada setState
+  // (el reloj lo dispara cada 1s) y antes reescribía el innerHTML de TODOS los
+  // paneles → parpadeo en alertas/logs, scroll que salta, CPU al pedo. Dentro de
+  // render() se escribe `el.__setHTML = html` / `el.__setText = txt`: compara contra
+  // lo último que escribimos (no contra el DOM, que el browser normaliza) y deja
+  // `el.__changed` para quien necesite saber si hubo cambio (scroll del chat).
+  Object.defineProperty(Element.prototype, '__setHTML', {
+    configurable: true,
+    set: function (html) {
+      this.__changed = this.__html !== html;
+      if (this.__changed) { this.innerHTML = html; this.__html = html; }
+    },
+  });
+  Object.defineProperty(Element.prototype, '__setText', {
+    configurable: true,
+    set: function (txt) {
+      txt = String(txt == null ? '' : txt);
+      this.__changed = this.__txt !== txt;
+      if (this.__changed) { this.textContent = txt; this.__txt = txt; }
+    },
+  });
+
   function render() {
     // header
     var wsMeta = ({
@@ -768,8 +861,8 @@
       offline: { label: 'OFFLINE', color: '#f87171' },
     })[state.wsState] || { label: 'CONNECTING', color: '#fbbf24' };
     var dot = $('ws-dot'); dot.style.background = wsMeta.color; dot.style.boxShadow = '0 0 10px ' + wsMeta.color;
-    var wl = $('ws-label'); wl.textContent = wsMeta.label; wl.style.color = wsMeta.color;
-    $('clock').textContent = state.clock; $('date').textContent = state.dateStr;
+    var wl = $('ws-label'); wl.__setText = wsMeta.label; wl.style.color = wsMeta.color;
+    $('clock').__setText = state.clock; $('date').__setText = state.dateStr;
 
     // views + tabs
     $('view-ops').style.display = state.view === 'ops' ? 'grid' : 'none';
@@ -785,13 +878,13 @@
     if (rBody) {
       var rd = state.research;
       if (rd && rd.available) {
-        rBody.innerHTML = mdToHtml(rd.content);
-        if (rMeta) rMeta.textContent = String(rd.name || '');
+        rBody.__setHTML = mdToHtml(rd.content);
+        if (rMeta) rMeta.__setText = String(rd.name || '');
       } else {
-        rBody.innerHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;text-align:center;color:rgba(207,233,242,0.3);font-size:13px;padding:20px;">' + (rd ? esc((rd.reason || 'Sin research todavía.') + ' El digest se arma solo cada mañana, o tocá REFRESH.') : 'Cargando…') + '</div>';
-        if (rMeta) rMeta.textContent = '';
+        rBody.__setHTML = '<div style="height:100%;display:flex;align-items:center;justify-content:center;text-align:center;color:rgba(207,233,242,0.3);font-size:13px;padding:20px;">' + (rd ? esc((rd.reason || 'Sin research todavía.') + ' El digest se arma solo cada mañana, o tocá REFRESH.') : 'Cargando…') + '</div>';
+        if (rMeta) rMeta.__setText = '';
       }
-      if (rBtn) { rBtn.textContent = state.researchRefreshing ? 'BUSCANDO…' : 'REFRESH'; rBtn.style.opacity = state.researchRefreshing ? '0.6' : '1'; }
+      if (rBtn) { rBtn.__setText = state.researchRefreshing ? 'BUSCANDO…' : 'REFRESH'; rBtn.style.opacity = state.researchRefreshing ? '0.6' : '1'; }
     }
 
     // chat log
@@ -802,8 +895,8 @@
         return '<div style="align-self:' + (me ? 'flex-end' : 'flex-start') + ';max-width:78%;background:' + (me ? 'rgba(34,211,238,0.14)' : 'rgba(167,139,250,0.07)') + ';border:1px solid ' + (me ? 'rgba(34,211,238,0.3)' : 'rgba(167,139,250,0.25)') + ';border-radius:10px;padding:8px 12px;font-size:14px;color:' + (me ? '#e6faff' : 'rgba(207,233,242,0.88)') + ';line-height:1.4;">' + esc(m.text) + '</div>';
       });
       if (state.chatSending) rows.push('<div style="align-self:flex-start;color:rgba(167,139,250,0.7);font-size:12px;font-style:italic;">FRIDAY está pensando…</div>');
-      clog.innerHTML = rows.length ? rows.join('') : '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:13px;">Escribile a FRIDAY para empezar.</div>';
-      if (state.view === 'control') clog.scrollTop = clog.scrollHeight;
+      clog.__setHTML = rows.length ? rows.join('') : '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:13px;">Escribile a FRIDAY para empezar.</div>';
+      if (clog.__changed && state.view === 'control') clog.scrollTop = clog.scrollHeight;
     }
 
     // gastos
@@ -811,7 +904,7 @@
     if (gEl) {
       var g = state.gastos;
       if (g && g.available) {
-        if ($('gastos-mes')) $('gastos-mes').textContent = String(g.mes || '').toUpperCase();
+        if ($('gastos-mes')) $('gastos-mes').__setText = String(g.mes || '').toUpperCase();
         var r = g.resumen || {};
         var gRow = function (label, val, color) {
           return '<div style="display:flex;justify-content:space-between;padding:7px 2px;border-bottom:1px solid rgba(74,222,128,0.08);"><span style="font-size:13px;color:rgba(207,233,242,0.6);">' + label + '</span><span style="font-family:\'JetBrains Mono\',monospace;font-size:14px;color:' + (color || '#e6faff') + ';">' + esc(val || '—') + '</span></div>';
@@ -819,15 +912,15 @@
         var cats = (g.categorias || []).slice(0, 6).map(function (c) {
           return '<div style="display:flex;justify-content:space-between;padding:5px 2px;font-size:12px;"><span style="color:rgba(207,233,242,0.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:62%;">' + esc(c[0] || '') + '</span><span style="font-family:\'JetBrains Mono\',monospace;color:#9fe9f5;">' + esc(c[2] || '') + '</span></div>';
         }).join('');
-        gEl.innerHTML = gRow('Ingresos', r.ingresos, '#4ade80') + gRow('Gastos', r.gastos, '#fbbf24') + gRow('Balance', r.balance, '#22d3ee') + gRow('Tasa ahorro', r.tasa_ahorro) + (cats ? '<div style="margin-top:10px;margin-bottom:4px;font-size:10px;letter-spacing:1.5px;color:rgba(207,233,242,0.4);">POR CATEGORÍA</div>' + cats : '');
+        gEl.__setHTML = gRow('Ingresos', r.ingresos, '#4ade80') + gRow('Gastos', r.gastos, '#fbbf24') + gRow('Balance', r.balance, '#22d3ee') + gRow('Tasa ahorro', r.tasa_ahorro) + (cats ? '<div style="margin-top:10px;margin-bottom:4px;font-size:10px;letter-spacing:1.5px;color:rgba(207,233,242,0.4);">POR CATEGORÍA</div>' + cats : '');
       } else {
-        if ($('gastos-mes')) $('gastos-mes').textContent = '';
-        gEl.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;text-align:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;">' + (g && g.reason ? esc(g.reason) : 'Gastos no configurado.') + '</div>';
+        if ($('gastos-mes')) $('gastos-mes').__setText = '';
+        gEl.__setHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;text-align:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;">' + (g && g.reason ? esc(g.reason) : 'Gastos no configurado.') + '</div>';
       }
     }
 
     // vitals
-    $('vitals').innerHTML = gaugeHTML('CPU', state.cpu) + gaugeHTML('RAM', state.ram) + gaugeHTML('DISK', state.disk);
+    $('vitals').__setHTML = gaugeHTML('CPU', state.cpu) + gaugeHTML('RAM', state.ram) + gaugeHTML('DISK', state.disk);
 
     // core mode
     var mode = state.coreMode;
@@ -840,22 +933,22 @@
       thinking: { label: 'PROCESSING', sub: 'Reasoning through request', color: '#fbbf24' },
       speaking: { label: 'RESPONDING', sub: 'Synthesizing voice', color: '#4ade80' },
     })[mode] || { label: 'STANDBY', sub: '', color: '#22d3ee' };
-    var ml = $('mode-label'); ml.textContent = modeMeta.label; ml.style.color = modeMeta.color; ml.style.textShadow = '0 0 12px ' + modeMeta.color;
-    $('mode-sub').textContent = modeMeta.sub;
+    var ml = $('mode-label'); ml.__setText = modeMeta.label; ml.style.color = modeMeta.color; ml.style.textShadow = '0 0 12px ' + modeMeta.color;
+    $('mode-sub').__setText = modeMeta.sub;
 
     // health
     var h = state.health;
     var sr = h ? clamp(h.tool_success_rate, 0, 1) : 1;
     var hColor = sr >= 0.9 ? '#4ade80' : sr >= 0.7 ? '#fbbf24' : '#f87171';
     var ring = $('health-ring'); ring.style.stroke = hColor; ring.style.strokeDashoffset = (C * (1 - sr)) + 'px'; ring.style.filter = 'drop-shadow(0 0 5px ' + hColor + ')';
-    $('health-pct').textContent = Math.round(sr * 100);
-    $('latency').textContent = h ? Math.round(h.avg_latency_ms) : 0;
+    $('health-pct').__setText = Math.round(sr * 100);
+    $('latency').__setText = h ? Math.round(h.avg_latency_ms) : 0;
     var fb = h ? h.ollama_fallbacks : 0;
-    var fbEl = $('fallbacks'); fbEl.textContent = fb;
+    var fbEl = $('fallbacks'); fbEl.__setText = fb;
     fbEl.style.color = fb > 0 ? '#fbbf24' : 'rgba(207,233,242,0.4)'; fbEl.style.borderColor = fb > 0 ? '#fbbf24' : 'rgba(207,233,242,0.4)';
-    $('toolcalls').textContent = h ? h.tool_calls : 0;
+    $('toolcalls').__setText = h ? h.tool_calls : 0;
     var te = h ? h.tool_errors : 0;
-    var teEl = $('toolerrors'); teEl.textContent = te; teEl.style.color = te > 0 ? '#f87171' : '#dcf2f8';
+    var teEl = $('toolerrors'); teEl.__setText = te; teEl.style.color = te > 0 ? '#f87171' : '#dcf2f8';
 
     // NEXCOURT + AXIS (infra por servicio/container)
     renderInfra('nexcourt', state.nexcourt, true, nexcourtEmptyHTML());
@@ -869,15 +962,15 @@
       idle: { label: 'IDLE', color: 'rgba(207,233,242,0.5)' },
       no_log: { label: 'OFFLINE', color: 'rgba(207,233,242,0.4)' },
     })[state.voiceState] || { label: String(state.voiceState || 'IDLE').toUpperCase(), color: '#4ade80' };
-    var vs = $('voice-state'); vs.textContent = vMeta.label; vs.style.color = vMeta.color;
-    $('voice-lines').innerHTML = state.voiceLines.length
+    var vs = $('voice-state'); vs.__setText = vMeta.label; vs.style.color = vMeta.color;
+    $('voice-lines').__setHTML = state.voiceLines.length
       ? state.voiceLines.slice(-8).map(function (l) { return '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(l) + '</div>'; }).join('')
       : '<div style="color:rgba(207,233,242,0.3);">Sin actividad de voz.</div>';
 
     // routines (botones que EJECUTAN — el HUD pasa de mirar a actuar)
     var rEl = $('routines');
     if (state.routines.length) {
-      rEl.innerHTML = state.routines.map(function (r) {
+      rEl.__setHTML = state.routines.map(function (r) {
         var running = state.routineRunning === r.name;
         return '<button data-routine="' + esc(r.name) + '"' + (running ? ' disabled' : '') +
           ' style="text-align:left;cursor:' + (running ? 'default' : 'pointer') + ';background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.35);border-radius:8px;padding:9px 12px;color:#e6faff;font-family:Rajdhani,sans-serif;' + (running ? 'opacity:.6;' : '') + '">' +
@@ -890,14 +983,14 @@
         '</button>';
       }).join('');
     } else {
-      rEl.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;">Sin rutinas.</div>';
+      rEl.__setHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:12px;padding:14px;">Sin rutinas.</div>';
     }
-    $('routine-status').textContent = state.routines.length ? state.routines.length + ' AVAILABLE' : '';
+    $('routine-status').__setText = state.routines.length ? state.routines.length + ' AVAILABLE' : '';
 
     // alerts
     var alertsEl = $('alerts');
     if (state.notifications.length) {
-      alertsEl.innerHTML = state.notifications.map(function (n) {
+      alertsEl.__setHTML = state.notifications.map(function (n) {
         var color = levelColor(n.level);
         return '<div style="display:flex;gap:10px;padding:9px 11px;border-radius:8px;background:rgba(255,255,255,0.02);border-left:3px solid ' + color + ';box-shadow:inset 0 0 0 1px rgba(34,211,238,0.04);animation:fr-row .45s ease;">' +
           '<div style="flex:1;min-width:0;">' +
@@ -911,13 +1004,13 @@
         '</div>';
       }).join('');
     } else {
-      alertsEl.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:13px;letter-spacing:1px;padding:18px;">No active alerts — monitoring.</div>';
+      alertsEl.__setHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:13px;letter-spacing:1px;padding:18px;">No active alerts — monitoring.</div>';
     }
 
     // feed
     var feedEl = $('feed');
     if (state.activity.length) {
-      feedEl.innerHTML = state.activity.map(function (r) {
+      feedEl.__setHTML = state.activity.map(function (r) {
         var color = r.status === 'ok' ? '#4ade80' : r.status === 'error' ? '#f87171' : '#22d3ee';
         var anim = r.status === 'running' ? 'fr-dot 1s ease-in-out infinite' : 'none';
         return '<div style="display:flex;align-items:center;gap:12px;padding:8px 4px;border-bottom:1px solid rgba(34,211,238,0.06);animation:fr-row .4s ease;">' +
@@ -929,21 +1022,21 @@
         '</div>';
       }).join('');
     } else {
-      feedEl.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:13px;letter-spacing:1px;padding:18px;">Awaiting agent activity…</div>';
+      feedEl.__setHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(207,233,242,0.3);font-size:13px;letter-spacing:1px;padding:18px;">Awaiting agent activity…</div>';
     }
-    $('activity-count').textContent = state.activity.length + ' EVENTS';
+    $('activity-count').__setText = state.activity.length + ' EVENTS';
 
     // cost
     var cost = state.cost || 0;
     var now = new Date();
     var dayFrac = (now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds()) / 86400;
     var proj = dayFrac > 0.02 ? cost / dayFrac : cost;
-    $('cost').textContent = '$' + cost.toFixed(2);
-    $('proj').textContent = '$' + proj.toFixed(2);
-    $('chatcount').textContent = state.chatCount || (h ? h.chat_count : 0);
+    $('cost').__setText = '$' + cost.toFixed(2);
+    $('proj').__setText = '$' + proj.toFixed(2);
+    $('chatcount').__setText = state.chatCount || (h ? h.chat_count : 0);
 
     // toasts
-    $('toasts').innerHTML = state.toasts.map(function (t) {
+    $('toasts').__setHTML = state.toasts.map(function (t) {
       var color = levelColor(t.level);
       var glow = t.level === 'critical' ? 'rgba(248,113,113,0.5)' : t.level === 'warning' ? 'rgba(251,191,36,0.4)' : 'rgba(34,211,238,0.35)';
       return '<div style="width:100%;display:flex;gap:11px;padding:12px 15px;border-radius:10px;background:rgba(10,16,24,0.92);border:1px solid ' + color + ';box-shadow:0 0 22px ' + glow + ',0 10px 30px rgba(0,0,0,0.6);backdrop-filter:blur(12px);animation:fr-toast .35s cubic-bezier(.2,.8,.2,1);">' +
@@ -963,6 +1056,16 @@
   function mount() {
     tickClock();
     setInterval(tickClock, 1000);
+
+    // Page Visibility API: pausar polling cuando la pestaña no esté visible
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        pausePolling();
+      } else {
+        resumePolling();
+      }
+    });
+
     // Delegación de clicks para botones generados dinámicamente (login AWS, etc.).
     document.addEventListener('click', function (e) {
       var t = e.target;

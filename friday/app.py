@@ -152,13 +152,19 @@ class FridaySystem:
         # NEXCOURT: en AWS (cloudwatch) o en hosts locales (direct/kong).
         # Guardamos la referencia para que la API pueda chequear/resetear el auth
         # (botón de re-login cuando el token AWS vence).
+        # Modo "off" (default): no registrar collector para evitar polling cada 30s.
         self.nexcourt_collector = None
         if settings.nexcourt_mode == "cloudwatch":
             self.nexcourt_collector = CloudWatchCollector()
             collectors.append(self.nexcourt_collector)
-        elif settings.nexcourt_services or settings.nexcourt_services_config:
-            self.nexcourt_collector = NexcourtCollector()
-            collectors.append(self.nexcourt_collector)
+            logger.info("NEXCOURT collector: CloudWatch")
+        elif settings.nexcourt_mode in ("direct", "kong"):
+            if settings.nexcourt_services or settings.nexcourt_services_config:
+                self.nexcourt_collector = NexcourtCollector()
+                collectors.append(self.nexcourt_collector)
+                logger.info("NEXCOURT collector: %s", settings.nexcourt_mode)
+        elif settings.nexcourt_mode == "off":
+            logger.info("NEXCOURT desactivado (nexcourt_mode='off')")
 
         # AXIS: containers Docker en el droplet, vía SSH.
         if settings.axis_enabled:

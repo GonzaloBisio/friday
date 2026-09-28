@@ -70,14 +70,20 @@ def get_status(request: Request) -> JSONResponse:
 
 def _services_status(repo, now: datetime) -> list[dict[str, Any]]:
     """Estado de servicios internos de FRIDAY (SQLite, Gemini, collectors, etc.)."""
+    from friday.config import settings
+
     recent = now - timedelta(minutes=5)
     has_system = len(repo.query(source="system", name="cpu_percent", start=recent, limit=1)) > 0
     has_gemini = len(repo.query(source="gemini", name="requests", start=recent, limit=1)) > 0
+
+    # NEXCOURT: mostrar "disabled" si está en modo "off"
+    nexcourt_status = "disabled" if settings.nexcourt_mode == "off" else "standby"
+
     return [
         {"name": "SQLite", "status": "online"},
         {"name": "Gemini", "status": "online" if has_gemini else "standby"},
         {"name": "System Collector", "status": "online" if has_system else "standby"},
-        {"name": "NEXCOURT Collector", "status": "standby"},
+        {"name": "NEXCOURT Collector", "status": nexcourt_status},
         {"name": "Dashboard", "status": "online"},
     ]
 
