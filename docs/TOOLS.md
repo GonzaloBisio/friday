@@ -31,7 +31,7 @@
 | `listar_procesos(top?)` | Lista los procesos que más CPU o memoria consumen. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:205](../friday/agent/actions/pc_actions.py#L205) | 285 |
 | `leer_archivo(ruta, max_lineas?)` | Lee el contenido de un archivo de texto. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:234](../friday/agent/actions/pc_actions.py#L234) | 351 |
 | `info_sistema()` | Retorna información detallada del sistema operativo y hardware. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:260](../friday/agent/actions/pc_actions.py#L260) | 208 |
-| `listar_directorio(ruta?)` | Lista el contenido de un directorio. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:287](../friday/agent/actions/pc_actions.py#L287) | 284 |
+| `listar_directorio(ruta?)` | Lista el contenido de un directorio. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:289](../friday/agent/actions/pc_actions.py#L289) | 284 |
 | `reproducir_spotify(consulta, tipo?)` | Busca en Spotify y reproduce el primer resultado en el dispositivo activo. | LOW | spotify, web | siempre | [friday/integrations/spotify.py:165](../friday/integrations/spotify.py#L165) | 444 |
 | `pausar_spotify()` | Pausa la reproducción actual de Spotify. | LOW | spotify | siempre | [friday/integrations/spotify.py:198](../friday/integrations/spotify.py#L198) | 187 |
 | `siguiente_cancion()` | Pasa a la siguiente canción en Spotify. | LOW | spotify | siempre | [friday/integrations/spotify.py:217](../friday/integrations/spotify.py#L217) | 189 |

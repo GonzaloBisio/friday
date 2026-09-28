@@ -73,6 +73,20 @@ uso y `keep_alive=30m`). "shutdown" por voz descarga el modelo, no mata el servi
 
 Catálogo completo con riesgo y fuente: [TOOLS.md](TOOLS.md) (generado; un test exige que esté al día).
 
+## HUD en vivo (eventos por /ws/live)
+
+| Evento | Lo emite | Para qué |
+|---|---|---|
+| `voice` (`stage`: wake/listening/hearing/stt/thinking/speaking/muted/idle, `text`, `timings`) | listener → `POST /api/voice/event` | orbe, etapas, transcript, cascada de latencia |
+| `tool` (`running`/`ok`/`error`) | `activity_log.subscribe` en `app.py` | event stream, etapa TOOLS |
+| `hud` (`mode`: card/stage/view, `panel`, `data`, `reason`) | `core/hud.py` (auto por `TOOL_PANELS` o `mostrar_en_hud`) | **tarjeta de foco** / **ventana grande** (video, INTEL) |
+| `voice_control` | `POST /api/voice/control` (CONTROL) | el listener aplica mute / voz / cierre de turno en caliente |
+| `metric`, `proactive` | collectors / notifier | vitals, alertas |
+
+Emisión desde threads: `WebSocketBroadcast.emit()` agenda en el loop de uvicorn
+(`run_coroutine_threadsafe`). El HUD se identifica mandando `"hud"` al conectar
+(`mostrar_en_hud` sabe si hay pantalla mirando).
+
 ## Proactividad (el backend habla primero)
 
 `notifier` (umbrales, cada 60 s) y `analyst` (tendencias estadísticas, cada 30 min; el LLM no decide
@@ -116,6 +130,9 @@ y research diario 08:00 (digest markdown determinista, sin LLM en el camino crí
 - **HUD**: `render()` corre en cada `setState` (el reloj, cada 1 s). Toda escritura al DOM va por
   `el.__setHTML` / `el.__setText` (solo escriben si cambió) — si no, parpadea todo. Polling pausado con la
   pestaña oculta; alertas proactivas por WebSocket (historial una vez por conexión).
+- **RAM en macOS**: `psutil` cuenta caché/comprimida como usada (~80% en reposo). Se usa
+  `kern.memorystatus_level` (`platform_info.mac_memory_used_pct`). El notifier tiene histéresis
+  (5 pts) y enfriamiento (30 min) para warnings: sin eso las alertas de RAM flapeaban en loop.
 - **MLX + threads**: "There is no Stream(cpu, 1) in current thread" = se usó un modelo MLX desde otro
   thread. Todo el STT va por `_STT_POOL`.
 - **`pkill -f 'venv/bin/friday'` matchearía `friday-wake`**: el patrón está anclado en `shutdown_friday.sh`.

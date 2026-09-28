@@ -42,6 +42,7 @@ class Notifier:
         self._notif_repo = notif_repo
         self._broadcast = broadcast
         self._state: dict[str, str] = {}  # key → último nivel notificado
+        self._cleared_at: dict[str, datetime] = {}  # key → cuándo se normalizó (enfriamiento)
 
     def run(self) -> list[Notification]:
         """Ejecuta todos los chequeos. Retorna notificaciones nuevas generadas."""
@@ -149,14 +150,18 @@ class Notifier:
         warn: float, crit: float, unit: str, label: str,
     ) -> list[Notification]:
         """Evalúa umbrales warn/crit y genera notificación si cambió el estado."""
+        alerting = self._state.get(key) in ("warning", "critical")
         if value >= crit:
             level = "critical"
         elif value >= warn:
             level = "warning"
+        elif alerting and value >= warn - settings.notifier_hysteresis:
+            return []  # zona de histéresis: todavía no está "normalizado"
         else:
             # Volvió a normal — notificar recuperación si antes estaba alerta
-            if self._state.get(key) in ("warning", "critical"):
+            if alerting:
                 self._clear_state(key)
+                self._cleared_at[key] = datetime.now(timezone.utc)
                 return [Notification(
                     level="info",
                     title=f"{label} normalizado",
@@ -165,6 +170,10 @@ class Notifier:
                 )]
             return []
 
+        cleared = self._cleared_at.get(key)
+        if (level == "warning" and not alerting and cleared is not None
+                and datetime.now(timezone.utc) - cleared < timedelta(minutes=settings.notifier_realert_minutes)):
+            return []  # warning recién normalizado: enfriamiento (un critical avisa siempre)
         notif = self._maybe_notify(
             key=key, level=level,
             title=f"{label}: {value:.1f}{unit}",

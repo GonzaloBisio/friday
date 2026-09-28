@@ -264,6 +264,7 @@ def info_sistema() -> str:
         Resumen del sistema: OS, CPU, RAM, disco, uptime, red.
     """
     mem = psutil.virtual_memory()
+    ram_pct = platform_info.mac_memory_used_pct()  # macOS: presión real (ver platform_info)
     disk = psutil.disk_usage(platform_info.disk_path())
     boot = psutil.boot_time()
     uptime_s = psutil.time.time() - boot
@@ -276,7 +277,8 @@ def info_sistema() -> str:
     lines = [
         f"OS: {platform.system()} {platform.release()} ({platform.version()})",
         f"CPU: {psutil.cpu_count(logical=False)} cores / {psutil.cpu_count()} threads — {psutil.cpu_percent(interval=0.5)}% uso",
-        f"RAM: {mem.used / (1024**3):.1f} GB / {mem.total / (1024**3):.1f} GB ({mem.percent}%)",
+        (f"RAM: {ram_pct:.0f}% en uso · {mem.total / (1024**3):.0f} GB" if ram_pct is not None
+         else f"RAM: {mem.used / (1024**3):.1f} GB / {mem.total / (1024**3):.1f} GB ({mem.percent}%)"),
         f"Disco: {disk.used / (1024**3):.0f} GB / {disk.total / (1024**3):.0f} GB ({disk.percent}%)",
         f"Uptime: {uptime_h:.1f} horas",
         f"Red: ↑ {sent_gb:.2f} GB  ↓ {recv_gb:.2f} GB",

@@ -62,7 +62,9 @@ class TestSystemCollectorCollect:
         assert cpu.value == 23.5
         assert cpu.unit == "%"
 
-    def test_ram_values(self, collector):
+    def test_ram_values(self, collector, monkeypatch):
+        # Camino psutil (Linux / sin sysctl): el % sale de virtual_memory().
+        monkeypatch.setattr("friday.collectors.system.platform_info.mac_memory_used_pct", lambda: None)
         patches = _mock_psutil()
         with patches["friday.collectors.system.psutil.cpu_percent"], \
              patches["friday.collectors.system.psutil.virtual_memory"], \
@@ -95,3 +97,11 @@ class TestSystemCollectorRun:
 
     def test_source_property(self, collector):
         assert collector.source == "system"
+
+
+def test_ram_uses_macos_kernel_pressure_when_available(monkeypatch):
+    """macOS: psutil cuenta caché como usada (~80% en reposo → alertas en loop)."""
+    from friday.collectors.system import SystemCollector
+    monkeypatch.setattr("friday.collectors.system.platform_info.mac_memory_used_pct", lambda: 64.0)
+    ram = next(p for p in SystemCollector().collect() if p.name == "ram_percent")
+    assert ram.value == 64.0

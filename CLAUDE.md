@@ -15,6 +15,7 @@ fallback a Ollama (Gemma 4). Docs y código en español; la persona de FRIDAY ha
 | Por qué está diseñado así + gotchas | `docs/ARCHITECTURE.md` |
 | Traer voz/secretos desde la PC Windows vieja | `docs/MIGRATION.md` |
 | Cualquier knob (modelos, umbrales, horarios) | `friday/config.py` (`Settings`; `.env` lo pisa) |
+| Eventos en vivo del HUD / paneles que abre FRIDAY | `docs/ARCHITECTURE.md` § HUD en vivo · `friday/core/hud.py` |
 
 No leas `FRIDAY_IMPLEMENTATION_PLAN.md` (histórico, Windows) ni `friday/dashboard/` (Streamlit legacy)
 salvo que la tarea sea sobre eso. `friday/main.py` y `friday/core/cli.py` no se usan.

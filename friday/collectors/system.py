@@ -37,9 +37,11 @@ class SystemCollector(Collector):
 
         # RAM
         mem = psutil.virtual_memory()
+        # macOS: % según el kernel (presión real), no el de psutil que cuenta caché.
+        ram_pct = platform_info.mac_memory_used_pct()
         points.append(MetricPoint(
             timestamp=now, source=self.source, name="ram_percent",
-            value=mem.percent, unit="%",
+            value=ram_pct if ram_pct is not None else mem.percent, unit="%",
         ))
         points.append(MetricPoint(
             timestamp=now, source=self.source, name="ram_used_bytes",

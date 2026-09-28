@@ -254,3 +254,28 @@ class TestNotificationsAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["dismissed_count"] == 2
+
+
+class TestAntiFlapping:
+    """RAM oscilando alrededor de 80% ya no genera alerta/normalizado en loop."""
+
+    def _run(self, notifier, repo, value):
+        from datetime import datetime, timezone
+        from friday.models import MetricPoint
+        repo.save(MetricPoint(timestamp=datetime.now(timezone.utc), source="system",
+                              name="ram_percent", value=value, unit="%"))
+        return [n for n in notifier.run() if "RAM" in n.title]
+
+    def test_oscillation_alerts_once(self, notifier, repo):
+        titles = []
+        for v in [80.3, 79.8, 80.1, 79.6, 80.4, 78.0, 80.2]:
+            titles += [n.title for n in self._run(notifier, repo, v)]
+        assert titles == ["RAM: 80.3%"]  # un solo aviso, sin "normalizado" intermedio
+
+    def test_recovers_below_hysteresis_then_cools_down(self, notifier, repo):
+        assert self._run(notifier, repo, 82.0)                   # warning
+        rec = self._run(notifier, repo, 74.0)                    # < 80 - 5 → normalizado
+        assert rec and "normalizado" in rec[0].title
+        assert self._run(notifier, repo, 81.0) == []             # enfriamiento: no re-alerta
+        crit = self._run(notifier, repo, 96.0)                   # un critical avisa siempre
+        assert crit and crit[0].level == "critical"

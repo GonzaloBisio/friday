@@ -288,6 +288,12 @@ class Settings(BaseSettings):
     notifier_ram_crit: float = 95.0
     notifier_disk_warn: float = 85.0
     notifier_disk_crit: float = 95.0
+    # Anti-flapping: un valor que oscila alrededor del umbral (RAM 79.8 ↔ 80.3)
+    # generaba "superó" / "normalizado" cada pocos minutos. Se da por normalizado
+    # recién al bajar `hysteresis` puntos del umbral, y la misma alerta no se repite
+    # antes de `realert_minutes` desde su normalización.
+    notifier_hysteresis: float = 5.0
+    notifier_realert_minutes: int = 30
     # Con billing + tope mensual de $4 en la API key, avisar a $0.50/día era ruido.
     # Subimos: un día cerca del tope mensual SÍ vale un aviso; el resto, silencio.
     notifier_gemini_cost_daily_warn: float = 2.00

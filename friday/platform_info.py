@@ -36,3 +36,28 @@ def disk_path(plat: str | None = None) -> str:
     if (plat or PLATFORM) == MACOS and os.path.isdir("/System/Volumes/Data"):
         return "/System/Volumes/Data"
     return "/"
+
+
+def mac_memory_used_pct() -> float | None:
+    """% de RAM en uso según macOS (100 − kern.memorystatus_level). None si no aplica.
+
+    psutil.virtual_memory().percent en macOS cuenta caché/comprimida como "usada":
+    marca ~80% en una Mac tranquila (medido: psutil 82.8% vs sistema 64%) y
+    disparaba alertas de RAM en loop. memorystatus_level es el "% libre" que usa el
+    propio kernel para la presión de memoria (lo que muestra Monitor de Actividad).
+    Lectura directa por sysctlbyname (ctypes): sin subprocess, barato cada 10 s.
+    """
+    if PLATFORM != MACOS:
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        val = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(val))
+        if libc.sysctlbyname(b"kern.memorystatus_level", ctypes.byref(val),
+                             ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
+            return None
+        return float(max(0, min(100, 100 - val.value)))
+    except Exception:  # noqa: BLE001
+        return None
