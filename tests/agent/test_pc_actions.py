@@ -251,3 +251,13 @@ class TestListarDirectorio:
         result = listar_directorio(str(f))
         assert "no es un directorio" in result.lower()
 
+
+
+class TestAbrirDashboard:
+    @patch(RUN)
+    def test_opens_local_hud(self, mock_run):
+        mock_run.return_value = _run_ok()
+        from friday.agent.actions.pc_actions import abrir_dashboard
+        from friday.config import settings
+        assert "command center" in abrir_dashboard().lower()
+        assert mock_run.call_args[0][0] == ["open", f"http://127.0.0.1:{settings.api_port}/"]

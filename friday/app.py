@@ -417,7 +417,8 @@ def main() -> None:
                         help="Además del HUD, lanza el dashboard Streamlit legacy (:8510)")
     # Compat: el HUD lo sirve la propia API, así que --no-dashboard ya no hace falta.
     parser.add_argument("--no-dashboard", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--api-port", type=int, default=8000, help="Puerto del API + HUD (default: 8000)")
+    parser.add_argument("--api-port", type=int, default=settings.api_port,
+                        help="Puerto del API + HUD (default: settings.api_port = 8000)")
     parser.add_argument("--dashboard-port", type=int, default=8510, help="Puerto del Streamlit legacy (default: 8510)")
     args = parser.parse_args()
 

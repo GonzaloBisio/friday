@@ -3,8 +3,8 @@
 > **No editar a mano.** Generado por `scripts/gen_tool_index.py` desde el registry real.
 > Regenerar: `./venv/bin/python scripts/gen_tool_index.py` (un test falla si queda viejo).
 
-- **30 tools** con todos los flags activos. Schema total ≈ **9,491 chars
-  (~2,372 tokens)** que viajan en CADA llamada al LLM, a precio lleno (no hay
+- **31 tools** con todos los flags activos. Schema total ≈ **9,714 chars
+  (~2,428 tokens)** que viajan en CADA llamada al LLM, a precio lleno (no hay
   cache implícito por debajo de 4.096 tokens) → ver [MODELS.md](MODELS.md#6-costo-por-turno-medido).
 - **Riesgo**: LOW ejecuta solo · MEDIUM/HIGH queda pendiente de confirmación
   (`friday/agent/permissions.py`). `—` = tool de lectura directa (no pasa por el gate).
@@ -24,13 +24,14 @@
 | `abrir_app(nombre)` | Abre una aplicación en la Mac de Gonzalo. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:63](../friday/agent/actions/pc_actions.py#L63) | 306 |
 | `cerrar_app(nombre)` | Cierra una aplicación abierta en la Mac de Gonzalo. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:86](../friday/agent/actions/pc_actions.py#L86) | 317 |
 | `abrir_url(url)` | Abre una URL en el navegador (o app) por defecto. | LOW | web | siempre | [friday/agent/actions/pc_actions.py:115](../friday/agent/actions/pc_actions.py#L115) | 299 |
-| `buscar_en_google(consulta)` | Abre una búsqueda de Google en el navegador por defecto. | LOW | web | siempre | [friday/agent/actions/pc_actions.py:169](../friday/agent/actions/pc_actions.py#L169) | 330 |
+| `abrir_dashboard()` | Abre el Command Center (HUD / dashboard / panel) de FRIDAY en el navegador. | LOW | pc, friday | siempre | [friday/agent/actions/pc_actions.py:169](../friday/agent/actions/pc_actions.py#L169) | 223 |
+| `buscar_en_google(consulta)` | Abre una búsqueda de Google en el navegador por defecto. | LOW | web | siempre | [friday/agent/actions/pc_actions.py:184](../friday/agent/actions/pc_actions.py#L184) | 330 |
 | `buscar_web(consulta, cantidad?)` | Busca en la web y devuelve los primeros resultados (título, resumen y URL). | LOW | web, research | siempre | [friday/integrations/web_research.py:90](../friday/integrations/web_research.py#L90) | 382 |
 | `leer_pagina(url)` | Baja una página web y devuelve su contenido principal en texto limpio. | LOW | web, research | siempre | [friday/integrations/web_research.py:120](../friday/integrations/web_research.py#L120) | 285 |
-| `listar_procesos(top?)` | Lista los procesos que más CPU o memoria consumen. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:190](../friday/agent/actions/pc_actions.py#L190) | 285 |
-| `leer_archivo(ruta, max_lineas?)` | Lee el contenido de un archivo de texto. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:219](../friday/agent/actions/pc_actions.py#L219) | 351 |
-| `info_sistema()` | Retorna información detallada del sistema operativo y hardware. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:245](../friday/agent/actions/pc_actions.py#L245) | 208 |
-| `listar_directorio(ruta?)` | Lista el contenido de un directorio. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:272](../friday/agent/actions/pc_actions.py#L272) | 284 |
+| `listar_procesos(top?)` | Lista los procesos que más CPU o memoria consumen. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:205](../friday/agent/actions/pc_actions.py#L205) | 285 |
+| `leer_archivo(ruta, max_lineas?)` | Lee el contenido de un archivo de texto. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:234](../friday/agent/actions/pc_actions.py#L234) | 351 |
+| `info_sistema()` | Retorna información detallada del sistema operativo y hardware. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:260](../friday/agent/actions/pc_actions.py#L260) | 208 |
+| `listar_directorio(ruta?)` | Lista el contenido de un directorio. | LOW | pc | siempre | [friday/agent/actions/pc_actions.py:287](../friday/agent/actions/pc_actions.py#L287) | 284 |
 | `reproducir_spotify(consulta, tipo?)` | Busca en Spotify y reproduce el primer resultado en el dispositivo activo. | LOW | spotify, web | siempre | [friday/integrations/spotify.py:165](../friday/integrations/spotify.py#L165) | 444 |
 | `pausar_spotify()` | Pausa la reproducción actual de Spotify. | LOW | spotify | siempre | [friday/integrations/spotify.py:198](../friday/integrations/spotify.py#L198) | 187 |
 | `siguiente_cancion()` | Pasa a la siguiente canción en Spotify. | LOW | spotify | siempre | [friday/integrations/spotify.py:217](../friday/integrations/spotify.py#L217) | 189 |

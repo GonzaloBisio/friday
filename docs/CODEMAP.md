@@ -13,11 +13,11 @@
 voices/  (Vosk, Piper, jarvis.wav)        LaunchAgent com.friday.wake (al login)
    │                                                │
    ▼                                                ▼
-friday/voice/wake.py ── main():1119 ─ Vosk grammar ["friday",…] ─► "friday" detectada
+friday/voice/wake.py ── main():1162 ─ Vosk grammar ["friday",…] ─► "friday" detectada
    │  ├─ speak() saludo ─ _synthesize():467  _start_speech → _StreamPlayer (Pocket streaming → PyAudio) │ Piper+afplay
    │  ├─ launch_friday() → start.sh (si :8000 no responde) → Ollama + friday.app
-   │  └─ conversation_loop → _run_conversation():931
-   │        ├─ _listen_turn():853   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
+   │  └─ conversation_loop → _run_conversation():966
+   │        ├─ _listen_turn():888   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
    │        ├─ _transcribe()        Parakeet (GPU, _STT_POOL) │ whisper-turbo │ faster-whisper │ Vosk
    │        ├─ ask_friday() ── HTTP POST 127.0.0.1:8000/api/chat ──────────────┐
    │        └─ _play_with_interrupt()  barge-in con filtro de eco (_is_echo)      │

@@ -166,6 +166,21 @@ def _unsupported(what: str) -> str:
     return f"Todavía no sé {what} en esta plataforma ({platform_info.PLATFORM})."
 
 
+def abrir_dashboard() -> str:
+    """Abre el Command Center (HUD / dashboard / panel) de FRIDAY en el navegador.
+
+    Es la UI propia de FRIDAY (métricas, alertas, actividad), servida por su API
+    local. Usar esto —no abrir_app— cuando Gonzalo pide "el dashboard", "el HUD",
+    "el panel" o "el command center".
+
+    Returns:
+        Mensaje honesto: confirma si abrió, o explica por qué no pudo.
+    """
+    from friday.config import settings
+    result = abrir_url(f"http://127.0.0.1:{settings.api_port}/")
+    return "Listo, abrí el Command Center." if result.startswith("Listo") else result
+
+
 def buscar_en_google(consulta: str) -> str:
     """Abre una búsqueda de Google en el navegador por defecto.
 

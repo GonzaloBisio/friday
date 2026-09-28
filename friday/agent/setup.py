@@ -8,6 +8,7 @@ from typing import Callable
 
 from friday.agent.actions.pc_actions import (
     abrir_app,
+    abrir_dashboard,
     abrir_url,
     buscar_en_google,
     cerrar_app,
@@ -40,6 +41,9 @@ def build_action_registry() -> ActionRegistry:
     reg.register("cerrar_app", "Cierra una aplicación por nombre", RiskLevel.LOW, cerrar_app, tags=("pc",))
     # WEB: abrir URLs y buscar en Google. Reversible, bajo riesgo → ejecuta solo.
     reg.register("abrir_url", "Abre una URL (web o spotify:) en el navegador/app por defecto", RiskLevel.LOW, abrir_url, tags=("web",))
+    # La UI propia de FRIDAY. Sin esta tool el modelo probaba abrir_app("dashboard")
+    # y fallaba (visto en el log real): no sabía que el HUD es una URL local.
+    reg.register("abrir_dashboard", "Abre el Command Center (HUD) de FRIDAY en el navegador", RiskLevel.LOW, abrir_dashboard, tags=("pc", "friday"))
     reg.register("buscar_en_google", "Abre en el navegador una búsqueda de Google (para que la vea Gonzalo)", RiskLevel.LOW, buscar_en_google, tags=("web",))
     # RESEARCH: traen el TEXTO al modelo (vs. abrir el navegador) → discutir/comparar/recomendar.
     reg.register("buscar_web", "Busca en la web y DEVUELVE los resultados (título, resumen, URL) para razonar sobre ellos", RiskLevel.LOW, buscar_web, tags=("web", "research"))

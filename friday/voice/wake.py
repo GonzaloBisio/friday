@@ -577,6 +577,12 @@ class _StreamPlayer:
                         if self._stop.is_set():
                             return
                         out.write(pcm[i:i + _OUT_BLOCK * 2])
+            # write() vuelve cuando el audio está ENCOLADO, no cuando sonó: sin esto el
+            # player "terminaba" con ~100-300ms aún saliendo del parlante y el mic
+            # capturaba la cola ("service.", "holiday.") como si fuera un turno tuyo.
+            # stop_stream (Pa_StopStream) bloquea hasta que suene todo lo encolado.
+            out.stop_stream()
+            out.start_stream()
         except Exception as e:  # noqa: BLE001 — un fallo de audio no tumba el loop
             log(f"  Pocket TTS stream error: {e!r}")
 
@@ -637,6 +643,35 @@ def _is_echo(heard, said):
     hits = sum(1 for w in heard_w
                if w in said_w or difflib.get_close_matches(w, said_w, n=1, cutoff=0.7))
     return hits / len(heard_w) >= ECHO_OVERLAP
+
+
+# Eco de COLA: la última palabra de FRIDAY a veces llega al mic justo después de
+# terminar (reverb/latencia de salida) y el endpointer la toma como un turno nuevo.
+POST_ECHO_MAX_WORDS = 4
+
+
+def _is_tail_echo(heard, said):
+    """True si `heard` (corto) es el final de lo que FRIDAY acaba de decir."""
+    words = re.findall(r"[a-z']+", heard.lower())
+    if not words or len(words) > POST_ECHO_MAX_WORDS:
+        return False
+    tail = " ".join(re.findall(r"[a-z']+", (said or "").lower())[-8:])
+    return _is_echo(heard, tail)
+
+
+def _speakable(text):
+    """Deja solo lo pronunciable: sin emojis, pictogramas ni símbolos de markdown.
+
+    El prompt pide "no emojis", pero flash-lite a veces responde solo "✨" → el TTS
+    no decía nada y parecía colgado.
+    """
+    import unicodedata
+    out = "".join(
+        ch for ch in (text or "")
+        if unicodedata.category(ch) not in ("So", "Sk", "Cs", "Co", "Mn")
+        and ch not in "*_#`~|>" and not 0xFE00 <= ord(ch) <= 0xFE0F
+    )
+    return re.sub(r"\s+", " ", out).strip()
 
 
 def _play_with_interrupt(player, stream, model, said=""):
@@ -940,6 +975,7 @@ def _run_conversation(stream, model, voice):
     log("  [conversacion] Te escucho... (deci 'stop' para terminar)")
     vad_threshold = _calibrate_vad(stream)
     last_activity = time.time()
+    last_answer = ""  # lo último que dijo FRIDAY (filtro de eco de cola)
 
     while True:
         _set_light("listening")  # celeste: te estoy escuchando
@@ -950,6 +986,11 @@ def _run_conversation(stream, model, voice):
             return
         if not text:
             continue
+        if last_answer and _is_tail_echo(text, last_answer):
+            log(f"  [eco de cola ignorado] '{text}'")
+            last_answer = ""  # solo el primer turno después de hablar puede ser cola
+            continue
+        last_answer = ""
         last_activity = time.time()
         log(f"  Vos: {text}  [habla {spoke:.1f}s | STT {stt_dt:.1f}s]")
 
@@ -985,13 +1026,15 @@ def _run_conversation(stream, model, voice):
             log(f"  error API: {exc}")
             answer = "I couldn't reach my brain right now, sir."
         llm_dt = time.time() - t
-        answer = (answer or "").strip() or "I have no answer for that, sir."
-        log(f"  FRIDAY: {answer}")
+        raw = (answer or "").strip()
+        answer = _speakable(raw) or "Right away, sir."
+        log(f"  FRIDAY: {answer}" + (f"  (original: {raw!r})" if raw != answer else ""))
 
         # ── Responder con voz (Pocket TTS ~200ms) + interrupción ──────
         _set_light("responding")  # ámbar/dorado: FRIDAY hablando
         player = _start_speech(answer, voice)
         interrupted = _play_with_interrupt(player, stream, model, said=answer)
+        last_answer = "" if interrupted else answer
         first = getattr(player, "first_audio_s", None)
         tts_first = f"{first:.2f}s" if first is not None else "n/a"
         # Latencia percibida: desde que dejaste de hablar hasta que FRIDAY suena.

@@ -235,6 +235,8 @@ class Settings(BaseSettings):
     # (RiskLevel.LOW) y la API no tiene auth. En 0.0.0.0, cualquiera en tu Wi-Fi
     # podría pedir leer_archivo(~/.ssh/...). Solo abrilo si sabés lo que hacés.
     api_host: str = "127.0.0.1"
+    # Puerto del API + HUD. `friday --api-port` lo pisa; start.sh usa API_PORT.
+    api_port: int = 8000
 
     # --- Voz (listener) ---
     # Carpeta con modelos de voz (Vosk, Piper, jarvis.wav) y el log del listener.
