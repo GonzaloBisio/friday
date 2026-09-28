@@ -20,21 +20,23 @@ En la PC vieja quedaron cosas que **no están en git** y hay que traer:
 
 ```bash
 cd ~/dev/personal/friday
+git status --short                                       # si hay cambios locales: NO descartarlos, preguntar
 git fetch origin && git checkout main && git pull        # trae la versión Mac (con este archivo)
 
-# 1. jarvis.wav → repo (es el único binario de voz que se versiona)
+# jarvis.wav → repo (es el único binario de voz que se versiona)
 cp /mnt/c/Users/gonza/friday/voices/jarvis.wav voices/jarvis.wav
 git add voices/jarvis.wav
 git commit -m "chore(voice): agregar jarvis.wav para clonar la voz en la Mac"
 git push                                                 # ← confirmar con Gonzalo
-
-# 2. Secretos: mostrarlos para que Gonzalo los guarde en su gestor (NO commitear, NO pegar en chats)
-cat .env | grep -vE '^\s*(#|$)'
-echo "$(grep GOOGLE_SHEETS_CREDENTIALS .env)"            # ese JSON también viaja fuera de git
 ```
 
 Si `voices/jarvis.wav` aparece como ignorado, el pull no trajo el `.gitignore` nuevo: revisá que estés en
 `main` actualizado (debe contener `!voices/jarvis.wav`).
+
+**Secretos: la IA NO los lee ni los imprime** (`cat .env` los dejaría en el transcript). Gonzalo abre
+`.env` por su cuenta (`notepad.exe "$(wslpath -w .env)"`) y copia a su gestor de contraseñas los valores
+que quiera conservar. La `GEMINI_API_KEY` ni siquiera hace falta copiarla: se ve o se crea de nuevo en
+https://aistudio.google.com/apikey.
 
 Opcional, si Gonzalo quiere conservar memorias e historial: apagar FRIDAY (`bash stop.sh`) y copiar
 `friday.db` por un medio privado (USB, AirDrop desde otro equipo, zip cifrado). No por git.
