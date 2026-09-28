@@ -28,18 +28,31 @@ class ToolActivityLog:
         self._events: deque[dict] = deque(maxlen=maxlen)
         self._lock = threading.Lock()
         self._seq = 0
+        # Callbacks por evento (p. ej. push por WebSocket al HUD). Se llaman fuera del
+        # lock y cualquier error se traga: la transparencia no puede romper una tool.
+        self._subscribers: list = []
+
+    def subscribe(self, callback) -> None:
+        """Registra `callback(evento: dict)`; se invoca en cada record()."""
+        self._subscribers.append(callback)
 
     def record(self, tool: str, status: str, detail: str = "") -> None:
         """Registra un evento. status ∈ {running, ok, error}."""
         with self._lock:
             self._seq += 1
-            self._events.append({
+            event = {
                 "id": self._seq,
                 "ts": time.strftime("%H:%M:%S"),
                 "tool": tool,
                 "status": status,
                 "detail": _truncate(detail),
-            })
+            }
+            self._events.append(event)
+        for cb in list(self._subscribers):
+            try:
+                cb(dict(event))
+            except Exception:  # noqa: BLE001
+                pass
         # Pilar 6: este es el punto único por donde pasan TODAS las tools, así que
         # alimentamos acá la salud agregada. Solo los estados TERMINALES cuentan
         # (no el "running", que es el mismo evento a mitad de camino).

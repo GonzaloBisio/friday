@@ -21,16 +21,48 @@ class WebSocketBroadcast:
 
     def __init__(self) -> None:
         self._connections: list[WebSocket] = []
+        # Clientes que se identificaron como HUD ("hud" tras conectar). El listener de
+        # voz también está conectado, así que active_connections no alcanza para saber
+        # si hay una pantalla mirando (mostrar_en_hud lo necesita).
+        self._hud: set[int] = set()
+        # Loop de uvicorn (dueño de los sockets). emit() agenda ahí desde cualquier
+        # thread (tools, scheduler) con run_coroutine_threadsafe.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
+        self._loop = asyncio.get_running_loop()
         self._connections.append(ws)
         logger.info("WS client connected (%d total)", len(self._connections))
 
     def disconnect(self, ws: WebSocket) -> None:
         if ws in self._connections:
             self._connections.remove(ws)
+        self._hud.discard(id(ws))
         logger.info("WS client disconnected (%d remaining)", len(self._connections))
+
+    def mark_hud(self, ws: WebSocket) -> None:
+        self._hud.add(id(ws))
+
+    @property
+    def hud_clients(self) -> int:
+        return len(self._hud)
+
+    def emit(self, payload: dict) -> None:
+        """Envía `payload` a todos los clientes desde CUALQUIER thread (sync, best-effort).
+
+        Con el loop de uvicorn conocido, agenda send_json ahí (lo correcto: los
+        sockets pertenecen a ese loop). Sin loop todavía (nadie conectado) no hay a
+        quién mandar: no hace nada.
+        """
+        loop = self._loop
+        if loop is None or not self._connections:
+            return
+        try:
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(self.send_json(payload), loop)
+        except Exception:
+            logger.exception("Error emitiendo evento WS %s", payload.get("type"))
 
     async def send_json(self, data: dict) -> None:
         """Envía un mensaje JSON a todos los clientes conectados."""
@@ -100,6 +132,8 @@ async def ws_live(ws: WebSocket) -> None:
             data = await ws.receive_text()
             if data == "ping":
                 await ws.send_json({"type": "pong"})
+            elif data == "hud":
+                broadcast.mark_hud(ws)
     except WebSocketDisconnect:
         pass
     except Exception as exc:

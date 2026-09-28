@@ -13,11 +13,11 @@
 voices/  (Vosk, Piper, jarvis.wav)        LaunchAgent com.friday.wake (al login)
    │                                                │
    ▼                                                ▼
-friday/voice/wake.py ── main():1162 ─ Vosk grammar ["friday",…] ─► "friday" detectada
+friday/voice/wake.py ── main():1258 ─ Vosk grammar ["friday",…] ─► "friday" detectada
    │  ├─ speak() saludo ─ _synthesize():467  _start_speech → _StreamPlayer (Pocket streaming → PyAudio) │ Piper+afplay
    │  ├─ launch_friday() → start.sh (si :8000 no responde) → Ollama + friday.app
-   │  └─ conversation_loop → _run_conversation():966
-   │        ├─ _listen_turn():888   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
+   │  └─ conversation_loop → _run_conversation():1043
+   │        ├─ _listen_turn():963   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
    │        ├─ _transcribe()        Parakeet (GPU, _STT_POOL) │ whisper-turbo │ faster-whisper │ Vosk
    │        ├─ ask_friday() ── HTTP POST 127.0.0.1:8000/api/chat ──────────────┐
    │        └─ _play_with_interrupt()  barge-in con filtro de eco (_is_echo)      │
@@ -25,7 +25,7 @@ friday/voice/wake.py ── main():1162 ─ Vosk grammar ["friday",…] ─► "
 friday/api/routes_chat.py:40 post_chat ─► brain.chat(msg, model="auto") (thread executor)
    │
    ▼
-friday/core/brain.py  FridayBrain.chat():86           (Gemini; Ollama = ollama_brain.py)
+friday/core/brain.py  FridayBrain.chat():87           (Gemini; Ollama = ollama_brain.py)
    ├─ _select_model()/_classify()  fast │ balanced │ reasoning (solo "pro" explícito)
    ├─ _compact_old_tool_results()  recorta resultados de turnos previos (context_window.py)
    ├─ with_time_note(msg)          hora en el mensaje → prefijo estable → cache
@@ -34,13 +34,13 @@ friday/core/brain.py  FridayBrain.chat():86           (Gemini; Ollama = ollama_b
    │     └─ function_call → _execute_tool → ToolsRegistry.execute (_coerce_args)
    │                         └─ tool gated → PermissionGate.request (agent/permissions.py)
    │                               LOW → ejecuta · MEDIUM/HIGH → pending_confirmation
-   └─ 429 sin cuota → _fallback_to_ollama():184 (mismo chat_repo/session → continuidad)
+   └─ 429 sin cuota → _fallback_to_ollama():186 (mismo chat_repo/session → continuidad)
 ```
 
 ### Bootstrap y fondo
 
 ```
-friday.app:main():413 ─► FridaySystem():64
+friday.app:main():420 ─► FridaySystem():66
   ├─ SQLite (storage/db.py:get_connection) + RLock compartido por todos los repos
   ├─ tools: build_registry (lectura) + register_agent_tools (acciones gated)
   │         + memory/routine/health/research tools        → catálogo en docs/TOOLS.md
@@ -50,7 +50,7 @@ friday.app:main():413 ─► FridaySystem():64
   │    notifier 60s ─► ProactiveDispatcher ─► WS /ws/live ─► wake.proactive_listener
   │    analyst 30min (tendencias, estadístico) · briefings 08:30/22:00 (compose → lite)
   │    research 08:00 → knowledge/<cat>/<fecha>.md · purga métricas >30d (6h)
-  └─ start_api():297 uvicorn en settings.api_host (127.0.0.1) : HUD "/" + /api/* + /docs
+  └─ start_api():304 uvicorn en settings.api_host (127.0.0.1) : HUD "/" + /api/* + /docs
 ```
 
 ## 2. Archivos (qué es cada uno)
@@ -100,7 +100,8 @@ Ollama) · `pyproject.toml` (deps + extras `ir`,`voice`,`dev` + comandos `friday
 | **API** | `friday/api/main.py` | `create_app()`: monta routers (casi todos bajo `/api`). |
 | | `routes_*.py` | chat, agent (`/api/agent/run|confirm|tools|activity`), status/metrics, notifications, research, routines, lights/ir, nexcourt (re-login AWS), voice (log del listener), health, gastos, proactive/test, dashboard (`/`). |
 | | `ws.py` | `/ws/live`: métricas, "thinking", estado de servicios, eventos proactivos. |
-| **UI** | `friday/dashboard_web/index.html` | HUD "Command Center" (HTML puro, sin build). Intervalos en `POLL_INTERVALS`; escrituras al DOM por `__setHTML`/`__setText` (solo si cambió); alertas por WS. |
+| **UI** | `friday/dashboard_web/index.html` | HUD "Command Center" v2 (HTML puro, sin build): OPS (orbe + voice loop + cascada + tarjeta de foco), CONTROL (consola, autorizaciones, rutinas, ajustes de voz), INTEL (brief + digest), ⌘K y ventana grande. Todo en vivo por `/ws/live` (`onWS`); escrituras al DOM por `put()`/`txt()` (solo si cambió). |
+| **HUD en vivo** | `friday/core/hud.py` | `TOOL_PANELS` (tool → panel/modo) y `mostrar_en_hud`. Los cerebros llaman `hud_bridge.set_context()` / `tool_result()`. |
 | | `friday/dashboard/` | Streamlit legacy (solo con `friday --streamlit`). |
 | **Voz** | `friday/voice/wake.py` | Listener completo (wake word, VAD, STT, TTS, barge-in, mute, proactivo). Funciones `[SO]`: `_play_wav_async`, `_show_toast`, `launch_friday`, `shutdown_systems`. |
 | | `friday/voice/shutdown_friday.sh` | Mata procesos por patrón/puerto; descarga modelos de Ollama. |
@@ -124,5 +125,6 @@ Ollama) · `pyproject.toml` (deps + extras `ir`,`voice`,`dev` + comandos `friday
 | **Nuevo alias de app** ("abrí X") | `_MAC_APP_TARGETS` en `agent/actions/pc_actions.py` | Nombre exacto de la app en `/Applications`. |
 | **Nuevo aviso proactivo** | regla en `core/notifier.py` (umbral) o `core/analyst.py` (tendencia) | Nivel `critical` habla en voz: usarlo con cuidado. |
 | **Nueva tabla SQLite** | `storage/db.py` (migración + subir `schema_version`) + repo nuevo con el lock compartido | — |
+| **Que una tool abra un panel en el HUD** | `TOOL_PANELS` en `core/hud.py` + render en `renderPanel()` del HUD | Sin render específico se muestra como texto. `mode:"stage"` = ventana grande. |
 | **Nueva ruta HTTP** | `api/routes_<x>.py` + `include_router` en `api/main.py` | La API no tiene auth: queda en 127.0.0.1. |
 | **Cambiar comandos de voz** (stop/mute/shutdown) | constantes `EXIT_WORDS`, `MUTE_WORDS`, `SHUTDOWN_WORDS` en `voice/wake.py` | "unmute" no existe en el vocabulario de Vosk → se usa "resume". |

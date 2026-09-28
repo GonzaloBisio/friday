@@ -17,6 +17,7 @@ from friday.config import settings
 from friday.core.activity import activity_log, format_args
 from friday.core.context_window import compact_tool_result, day_stamp, with_time_note
 from friday.core.health import health_tracker
+from friday.core.hud import hud_bridge
 from friday.core.llm_base import FRIDAY_SYSTEM_PROMPT, ChatResult
 from friday.storage.chat_repo import ChatMessage, ChatRepository
 
@@ -78,6 +79,7 @@ class OllamaBrain:
         una respuesta final (o MAX_TOOL_ROUNDS).
         """
         self._compact_old_tool_results()
+        hud_bridge.set_context(user_message)
         # Hora en el mensaje (no en el system prompt) → prefijo estable → Ollama
         # reusa el KV-cache de system+tools en vez de re-procesar ~2.6K tokens.
         self._history.append({"role": "user", "content": with_time_note(user_message)})
@@ -312,6 +314,7 @@ class OllamaBrain:
             result = self._registry.execute(name, args)
             logger.info("Tool %s ejecutada OK", name)
             activity_log.record(name, "ok", str(result))
+            hud_bridge.tool_result(name, args, result)
             return str(result)
         except KeyError:
             logger.warning("Tool desconocida: %s", name)

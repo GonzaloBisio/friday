@@ -3,8 +3,8 @@
 > **No editar a mano.** Generado por `scripts/gen_tool_index.py` desde el registry real.
 > Regenerar: `./venv/bin/python scripts/gen_tool_index.py` (un test falla si queda viejo).
 
-- **31 tools** con todos los flags activos. Schema total ≈ **9,714 chars
-  (~2,428 tokens)** que viajan en CADA llamada al LLM, a precio lleno (no hay
+- **32 tools** con todos los flags activos. Schema total ≈ **10,247 chars
+  (~2,561 tokens)** que viajan en CADA llamada al LLM, a precio lleno (no hay
   cache implícito por debajo de 4.096 tokens) → ver [MODELS.md](MODELS.md#6-costo-por-turno-medido).
 - **Riesgo**: LOW ejecuta solo · MEDIUM/HIGH queda pendiente de confirmación
   (`friday/agent/permissions.py`). `—` = tool de lectura directa (no pasa por el gate).
@@ -44,3 +44,4 @@
 | `listar_rutinas()` | Lista las rutinas disponibles que FRIDAY puede ejecutar. | — |  | siempre | [friday/core/routines.py:130](../friday/core/routines.py#L130) | 203 |
 | `estado_de_friday()` | Reporta la salud actual de FRIDAY: éxito de tools, fallbacks y latencia. | — |  | siempre | [friday/core/health.py:82](../friday/core/health.py#L82) | 221 |
 | `consultar_research()` | Devuelve el último digest de research que FRIDAY juntó (novedades de IA/tech y backend). | — |  | siempre | [friday/core/research.py:117](../friday/core/research.py#L117) | 239 |
+| `mostrar_en_hud(panel, motivo?, url?)` | Muestra algo en el HUD (Command Center): un panel, una vista o un video. | — |  | siempre | [friday/core/hud.py:104](../friday/core/hud.py#L104) | 533 |

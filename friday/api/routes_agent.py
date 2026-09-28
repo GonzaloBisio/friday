@@ -61,6 +61,21 @@ def agent_activity(n: int = Query(default=30, ge=1, le=100)) -> JSONResponse:
     return JSONResponse({"events": activity_log.recent(n)})
 
 
+# ── GET /api/agent/pending ───────────────────────────────────────────────
+# Cola de autorizaciones del HUD: acciones MEDIUM/HIGH esperando OK humano.
+
+@router.get("/pending")
+def pending_actions(request: Request) -> list[dict]:
+    gate = request.app.state.friday.gate
+    if gate is None:
+        return []
+    return [
+        {"action_id": p.action_id, "action": p.spec.name, "risk": p.spec.risk.value,
+         "description": p.spec.description, "args": p.args}
+        for p in gate.pending_actions
+    ]
+
+
 # ── POST /api/agent/run ──────────────────────────────────────────────────
 
 @router.post("/run")

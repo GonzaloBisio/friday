@@ -26,6 +26,7 @@ from friday.core.context_window import (
     with_time_note,
 )
 from friday.core.health import health_tracker
+from friday.core.hud import hud_bridge
 from friday.core.llm_base import FRIDAY_SYSTEM_PROMPT, ChatResult
 from friday.core.tools_registry import ToolsRegistry
 from friday.storage.chat_repo import ChatMessage, ChatRepository
@@ -94,6 +95,7 @@ class FridayBrain:
             ChatResult con respuesta, modelo usado y tokens.
         """
         selected_model = self._select_model(user_message, model)
+        hud_bridge.set_context(user_message)  # el "por qué" de los paneles que se abran
         # Resultados de tools de turnos previos → recortados (una sola vez: después
         # el prefijo queda estable y cacheable). El turno nuevo los ve completos.
         self._compact_old_tool_results()
@@ -445,6 +447,7 @@ class FridayBrain:
             result = self._registry.execute(name, args)
             logger.info("Tool %s ejecutada OK", name)
             activity_log.record(name, "ok", str(result))
+            hud_bridge.tool_result(name, args, result)
             return str(result)
         except Exception as exc:
             logger.error("Error ejecutando tool %s: %s", name, exc)

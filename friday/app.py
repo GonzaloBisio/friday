@@ -31,6 +31,8 @@ from friday.core.analyst import TrendAnalyzer
 from friday.core.brain_factory import build_brain
 from friday.core.briefing import BriefingService
 from friday.core.health import register_health_tools
+from friday.core.hud import hud_bridge, register_hud_tools
+from friday.core.activity import activity_log
 from friday.core.memory_tools import register_memory_tools
 from friday.core.notifier import Notifier
 from friday.core.proactive import ProactiveDispatcher
@@ -103,6 +105,11 @@ class FridaySystem:
 
         # WebSocket broadcast (compartido entre collectors, notifier y API)
         self.broadcast = WebSocketBroadcast()
+        # HUD en vivo: cada evento de tool va al feed (sin polling) y las tools con
+        # panel abren la tarjeta de foco (modo EDITH). Ver friday/core/hud.py.
+        hud_bridge.broadcast = self.broadcast
+        activity_log.subscribe(lambda ev: self.broadcast.emit({"type": "tool", **ev}))
+        register_hud_tools(self.tools_registry)
 
         self.notifier = Notifier(
             repo=self.repo,

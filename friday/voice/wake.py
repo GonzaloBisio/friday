@@ -601,7 +601,11 @@ def _start_speech(text, voice):
     """Empieza a hablar YA y devuelve un player (poll/kill/wait).
 
     Pocket TTS en streaming si cargó; si no, WAV de Piper + afplay (fallback).
+    Con mute desde el HUD no suena nada (el texto igual llega al HUD).
     """
+    if _tts_muted:
+        log("  [voz] mute (HUD)")
+        return _SilentPlayer()
     if _load_pocket() is not None:
         log("  [voz] Pocket TTS (streaming)")
         return _StreamPlayer(text)
@@ -803,6 +807,77 @@ def ask_friday(message, timeout=120):
         return json.loads(resp.read()).get("response", "")
 
 
+# ── Voice loop en vivo para el HUD ─────────────────────────────────
+# Cada etapa del turno se reporta a POST /api/voice/event y el backend la reemite por
+# /ws/live. UNA cola + UN worker: los eventos llegan en orden (threads sueltos podían
+# invertir "thinking" y "speaking"). Fire-and-forget: si la API no está, se descartan.
+import queue as _queue  # noqa: E402
+
+_voice_q: "_queue.Queue[dict]" = _queue.Queue(maxsize=200)
+
+
+def _voice_worker():
+    import urllib.request
+    while True:
+        payload = _voice_q.get()
+        try:
+            req = urllib.request.Request(
+                f"{API_URL}/voice/event", data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=2).close()
+        except Exception:
+            pass
+
+
+threading.Thread(target=_voice_worker, daemon=True, name="friday-voice-events").start()
+
+
+def _emit_voice(stage, **fields):
+    """Reporta una etapa del turno al HUD (wake/listening/hearing/stt/thinking/speaking/muted/idle)."""
+    try:
+        _voice_q.put_nowait({"stage": stage, **{k: v for k, v in fields.items() if v is not None}})
+    except _queue.Full:
+        pass
+
+
+# Ajustes que manda el HUD (POST /api/voice/control → WS "voice_control").
+_tts_muted = False
+
+
+def _apply_voice_control(data):
+    """Aplica mute / voz / cierre de turno pedidos desde el HUD, en caliente."""
+    global _tts_muted, END_SILENCE_S, POCKET_VOICE, _pocket_voice
+    if "muted" in data:
+        _tts_muted = bool(data["muted"])
+    es = data.get("end_silence")
+    if isinstance(es, (int, float)) and 0.4 <= es <= 2.0:
+        END_SILENCE_S = float(es)
+    v = data.get("voice")
+    if v and v != POCKET_VOICE and _pocket is not None and not os.path.exists(JARVIS_REF):
+        try:
+            with _audio_lock:  # no cambiar la voz a mitad de una frase de speak()
+                _pocket_voice = _pocket.get_state_for_audio_prompt(v)
+            POCKET_VOICE = v
+        except Exception as e:  # noqa: BLE001
+            log(f"  [control] no pude cambiar a la voz '{v}': {e!r}")
+    log(f"  [control] mute={_tts_muted} voz={POCKET_VOICE} cierre={END_SILENCE_S:.1f}s")
+
+
+class _SilentPlayer:
+    """Player nulo para el modo mute del HUD: FRIDAY no habla, el texto se ve igual."""
+    first_audio_s = 0.0
+
+    def poll(self):
+        return 0
+
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        return 0
+
+
 def _set_light(state):
     """Fire-and-forget: empuja el estado de voz a la API para las luces IR.
 
@@ -918,6 +993,7 @@ def _listen_turn(stream, model, vad_threshold):
                 speech_start = last_voice = now
                 frames = bytearray(b"".join(preroll))  # incluir pre-roll, no clipear
                 log("  [conversacion] escuchando tu voz...")
+                _emit_voice("hearing")
             elif now - idle_start > CONV_SILENCE_TIMEOUT:
                 return None, 0.0, 0.0
             continue
@@ -928,6 +1004,7 @@ def _listen_turn(stream, model, vad_threshold):
             last_voice = now
             spec = None  # seguías hablando: el especulativo quedó viejo
         elif silence >= END_SILENCE_S:
+            _emit_voice("stt")
             break  # silencio sostenido → fin del turno
         elif (silence >= SPECULATIVE_STT_S and spec is None
               and last_voice - speech_start >= MIN_SPEECH_S):
@@ -979,10 +1056,12 @@ def _run_conversation(stream, model, voice):
 
     while True:
         _set_light("listening")  # celeste: te estoy escuchando
+        _emit_voice("listening")
         text, stt_dt, spoke = _listen_turn(stream, model, vad_threshold)
         if text is None:
             log("  [conversacion] silencio; vuelvo a esperar 'friday'.")
             _set_light("idle")  # blanco cálido: vuelta al reposo
+            _emit_voice("idle")
             return
         if not text:
             continue
@@ -993,6 +1072,7 @@ def _run_conversation(stream, model, voice):
         last_answer = ""
         last_activity = time.time()
         log(f"  Vos: {text}  [habla {spoke:.1f}s | STT {stt_dt:.1f}s]")
+        _emit_voice("thinking", text=text, who="you")
 
         if _matches_any(text, SHUTDOWN_WORDS):
             stream.stop_stream()
@@ -1001,8 +1081,10 @@ def _run_conversation(stream, model, voice):
 
         if _matches_any(text, EXIT_WORDS):
             stream.stop_stream()
+            _emit_voice("speaking", text="Goodbye, sir.", who="friday")
             speak("Goodbye, sir.", voice)
             _set_light("idle")
+            _emit_voice("idle")
             return
 
         if _matches_any(text, MUTE_WORDS):
@@ -1010,6 +1092,7 @@ def _run_conversation(stream, model, voice):
             # luego silencio total hasta que digas 'unmute'.
             stream.stop_stream()
             speak("Muted, sir. Say resume to bring me back.", voice)
+            _emit_voice("muted")
             _muted_wait(stream, model)        # bloquea hasta 'resume'
             stream.stop_stream()
             speak("I'm back, sir.", voice)
@@ -1032,6 +1115,7 @@ def _run_conversation(stream, model, voice):
 
         # ── Responder con voz (Pocket TTS ~200ms) + interrupción ──────
         _set_light("responding")  # ámbar/dorado: FRIDAY hablando
+        _emit_voice("speaking", text=answer, who="friday")
         player = _start_speech(answer, voice)
         interrupted = _play_with_interrupt(player, stream, model, said=answer)
         last_answer = "" if interrupted else answer
@@ -1042,6 +1126,10 @@ def _run_conversation(stream, model, voice):
         perceived = END_SILENCE_S + stt_dt + llm_dt + (first or 0.0)
         log(f"  [tiempos] respuesta ~{perceived:.1f}s = endpoint {END_SILENCE_S:.1f}s + "
             f"STT {stt_dt:.2f}s + LLM {llm_dt:.2f}s + TTS 1er audio {tts_first}")
+        _emit_voice("listening", timings={
+            "endpoint": round(END_SILENCE_S, 2), "stt": round(stt_dt, 2), "llm": round(llm_dt, 2),
+            "tts_first": round(first or 0.0, 2), "total": round(perceived, 2),
+        })
 
         if interrupted:
             # "Yes?" rápido y volver a escuchar
@@ -1119,6 +1207,12 @@ def proactive_listener(voice):
             continue
 
         log("  [proactivo] conectado al canal del backend.")
+        try:  # tomar los ajustes vigentes del HUD (si alguien los cambió antes)
+            import urllib.request
+            with urllib.request.urlopen(f"{API_URL}/voice/control", timeout=2) as r:
+                _apply_voice_control(json.loads(r.read()))
+        except Exception:
+            pass
         # recv() bloqueante con timeout largo: el silencio NO es una caída. El
         # timeout=10 de create_connection era el bug — mataba la conexión idle
         # cada vez que pasaban >10s sin mensaje, reconectando en loop (churn) y
@@ -1142,7 +1236,9 @@ def proactive_listener(voice):
                     data = json.loads(raw)
                 except (ValueError, TypeError):
                     continue
-                if data.get("type") == "proactive":
+                if data.get("type") == "voice_control":
+                    _apply_voice_control(data)
+                elif data.get("type") == "proactive":
                     _handle_proactive(data, voice)
         except Exception:
             pass  # caída real del socket → reconectar
@@ -1224,6 +1320,7 @@ def main():
             log(f"  → {text}")
             if TRIGGER in text:
                 log("🎤 WAKE WORD detectada!")
+                _emit_voice("wake")
                 # Pausar la escucha para no captar el propio saludo (eco).
                 stream.stop_stream()
                 # Saludo completo solo la primera vez; después, "sir?".
@@ -1235,6 +1332,7 @@ def main():
                 else:
                     greeting = random.choice(ACK_GREETINGS)
                 log(f"  FRIDAY: {greeting}")
+                _emit_voice("speaking", text=greeting, who="friday")
                 speak(greeting, voice)
 
                 # Asegurar que el backend (API) esté corriendo para conversar.
