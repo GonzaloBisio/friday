@@ -75,7 +75,7 @@ class TestChatRoute:
         resp = client.post("/api/chat", json={"message": "Hola"})
         assert resp.status_code == 200
         data = resp.json()
-        assert "GEMINI_API_KEY" in data["response"]
+        assert "api key" in data["response"].lower()  # se dice en voz: en inglés
         assert data["model"] == "none"
 
     def test_missing_field_rejected(self, client):

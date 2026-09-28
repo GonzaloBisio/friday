@@ -60,7 +60,8 @@ def test_chat_sends_system_prompt_and_no_streaming():
     assert last["role"] == "user"
     # La hora viaja en el mensaje (prefijo estable → KV-cache), no en el system.
     assert last["content"].startswith("¿cuánta RAM tengo?\n\n[local time ")
-    assert "local time" not in sent["messages"][0]["content"]
+    import re
+    assert not re.search(r"\d{2}:\d{2}", sent["messages"][0]["content"])  # sin hora-reloj
     assert sent["options"]["num_ctx"] == settings.ollama_num_ctx
     # Thinking apagado: si no, Gemma 4 gasta num_predict pensando y responde vacío.
     assert sent["think"] is False

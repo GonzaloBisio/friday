@@ -57,14 +57,14 @@ JARVIS_REF = os.path.join(VOICES_DIR, "jarvis.wav")
 # Voz del catálogo de Pocket TTS (sin login ni clonado) cuando no hay clip o el
 # clonado no está disponible. Muestras para elegir: voices/samples/*.wav.
 def _configured_voice():
-    """FRIDAY_TTS_VOICE (env) > TTS_VOICE del .env (friday.config) > 'charles'."""
+    """FRIDAY_TTS_VOICE (env) > TTS_VOICE del .env (friday.config) > 'michael'."""
     if os.environ.get("FRIDAY_TTS_VOICE"):
         return os.environ["FRIDAY_TTS_VOICE"]
     try:
         from friday.config import settings
         return settings.tts_voice
     except Exception:  # noqa: BLE001 — el listener no debe caerse por la config
-        return "charles"
+        return "michael"
 
 
 POCKET_VOICE = _configured_voice()
@@ -128,13 +128,22 @@ WHISPER_MODEL = "small.en"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE = "int8"
 _whisper = None       # instancia de WhisperModel (lazy)
-# macOS Apple Silicon: mlx-whisper corre en la GPU (Metal) → large-v3-turbo a la
-# latencia de small.en en CPU, con MUCHA mejor precisión. FRIDAY_STT fuerza el
-# backend ("mlx" | "faster-whisper"); por defecto mlx si está instalado.
+# macOS Apple Silicon (GPU/Metal). Medido en el M4 (frases de ~3s):
+#   parakeet-tdt-0.6b-v3  0.14s  ← default: no rellena a 30s como Whisper
+#   whisper-large-v3-turbo 1.05s ← fallback ("mlx")
+#   whisper-small.en       0.26s
+# FRIDAY_STT fuerza el backend: "parakeet" | "mlx" | "faster-whisper".
+PARAKEET_MODEL = os.environ.get("FRIDAY_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
 MLX_WHISPER_MODEL = os.environ.get(
     "FRIDAY_MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"
 )
-_stt_backend = None   # "mlx" | "faster-whisper" | "none" (resuelto lazy)
+_stt_backend = None   # "parakeet" | "mlx" | "faster-whisper" | "none" (resuelto lazy)
+# MLX ata sus streams de cómputo al THREAD que los creó ("There is no Stream(cpu, 1)
+# in current thread"). Por eso TODO el STT —carga, warm-up y cada transcripción,
+# incluida la especulativa— corre en este único worker. 1 worker = la GPU no se reparte.
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+_STT_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="friday-stt")
 
 # ── Conversación por voz ───────────────────────────────────────────
 # Tras la wake word, FRIDAY entra en modo conversación: escucha tu
@@ -145,7 +154,14 @@ CONV_SILENCE_TIMEOUT = 60  # seg sin hablar -> vuelve a esperar "friday"
 # El problema: Vosk cerraba el turno apenas hacías una pausa natural y te cortaba
 # a mitad de frase. Ahora medimos energía del mic (RMS) y solo cerramos el turno
 # tras END_SILENCE_S de silencio SOSTENIDO. Así tolera pausas para pensar.
-END_SILENCE_S = 1.3       # silencio sostenido (seg) para dar por terminado el turno
+# 0.8s (antes 1.3): cada décima acá es latencia pura en CADA turno. Si te corta a
+# mitad de frase, subilo con FRIDAY_END_SILENCE=1.0.
+END_SILENCE_S = float(os.environ.get("FRIDAY_END_SILENCE", "0.8"))
+# STT especulativo: a los SPECULATIVE_STT_S de silencio se empieza a transcribir en
+# segundo plano; si seguís hablando se descarta. Esconde la latencia del STT dentro
+# de la espera del endpoint.
+SPECULATIVE_STT_S = 0.3
+LISTEN_CHUNK = 1600       # frames por lectura del mic (100ms a 16kHz): granularidad del endpoint
 MIN_SPEECH_S = 0.4        # mínimo de habla para que un turno cuente (filtra ruidos)
 PREROLL_CHUNKS = 2        # chunks previos al inicio de voz (para no clipear la 1ra sílaba)
 _VAD_MARGIN = 2.2         # umbral de voz = piso_de_ruido * margen
@@ -279,6 +295,11 @@ def _load_pocket():
 
 
 def _load_whisper():
+    """Carga el STT en el thread de STT (ver _STT_POOL). Truthy si hay STT."""
+    return _STT_POOL.submit(_load_whisper_impl).result()
+
+
+def _load_whisper_impl():
     """Carga el STT UNA sola vez: mlx-whisper (macOS) o faster-whisper.
 
     Devuelve algo truthy si hay STT disponible; None si falla (cae a Vosk).
@@ -286,7 +307,20 @@ def _load_whisper():
     global _whisper, _stt_backend
     if _stt_backend is not None:
         return _whisper if _stt_backend != "none" else None
-    wanted = os.environ.get("FRIDAY_STT", "mlx" if IS_MACOS else "faster-whisper")
+    wanted = os.environ.get("FRIDAY_STT", "parakeet" if IS_MACOS else "faster-whisper")
+    if wanted == "parakeet":
+        try:
+            import numpy as np
+            from parakeet_mlx import from_pretrained
+            t0 = time.time()
+            _whisper = from_pretrained(PARAKEET_MODEL)
+            _stt_backend = "parakeet"
+            _parakeet_text(np.zeros(16000, dtype=np.float32))  # warm-up (compila kernels)
+            log(f"Parakeet '{PARAKEET_MODEL}' cargado en {time.time() - t0:.1f}s.")
+            return _whisper
+        except Exception as e:  # noqa: BLE001 — sin parakeet → mlx-whisper
+            log(f"Parakeet no disponible ({e!r}); pruebo mlx-whisper.")
+            wanted = "mlx"
     if wanted == "mlx":
         try:
             import mlx_whisper
@@ -314,14 +348,29 @@ def _load_whisper():
     return _whisper
 
 
+def _parakeet_text(arr):
+    """Audio float32 16kHz mono → texto con Parakeet (MLX)."""
+    import mlx.core as mx
+    from parakeet_mlx.audio import get_logmel
+    mel = get_logmel(mx.array(arr), _whisper.preprocessor_config)
+    return (_whisper.generate(mel)[0].text or "").strip()
+
+
 def _transcribe(audio_bytes):
-    """Transcribe audio PCM int16 16kHz mono con Whisper. '' si no está disponible."""
-    if _load_whisper() is None:
+    """Transcribe (bloqueante) en el thread de STT. '' si no hay STT."""
+    return _STT_POOL.submit(_transcribe_impl, audio_bytes).result()
+
+
+def _transcribe_impl(audio_bytes):
+    """Transcribe audio PCM int16 16kHz mono. Corre SOLO en el thread de STT."""
+    if _load_whisper_impl() is None:
         return ""
     try:
         import numpy as np
 
         arr = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        if _stt_backend == "parakeet":
+            return _parakeet_text(arr)
         if _stt_backend == "mlx":
             out = _whisper.transcribe(arr, path_or_hf_repo=MLX_WHISPER_MODEL, language="en")
             return (out.get("text") or "").strip()
@@ -475,15 +524,92 @@ def _stop_player(player):
         pass
 
 
-def speak(text, voice):
-    """Genera y reproduce voz de forma bloqueante (para saludos y despedidas).
+# ── TTS en streaming (latencia al primer audio ~40ms) ──────────────
+# Antes: sintetizar la respuesta ENTERA a un WAV y recién ahí lanzar afplay
+# (~0.9s + arranque del proceso). Ahora Pocket TTS genera en streaming y cada
+# chunk va directo a un stream de salida de PyAudio: FRIDAY empieza a hablar
+# mientras sigue generando (RTF ~0.14 en el M4 → nunca se queda sin audio).
+_OUT_BLOCK = 2048     # frames por write (~85ms a 24kHz): granularidad del corte
+_pa_out = None        # (PyAudio, stream de salida) reusados entre frases
 
-    Toma `_audio_lock` alrededor de síntesis+reproducción: como la voz proactiva
-    (otro thread) también pasa por acá, el lock evita que dos audios se solapen.
+
+def _out_stream(rate):
+    """Stream de salida PyAudio abierto UNA vez (abrirlo por frase suma latencia)."""
+    global _pa_out
+    if _pa_out is None or _pa_out[2] != rate:
+        import pyaudio
+        pa = pyaudio.PyAudio()
+        out = pa.open(format=pyaudio.paInt16, channels=1, rate=rate, output=True,
+                      frames_per_buffer=_OUT_BLOCK)
+        _pa_out = (pa, out, rate)
+    return _pa_out[1]
+
+
+class _StreamPlayer:
+    """Reproduce Pocket TTS en streaming. Interfaz tipo Popen: poll/kill/wait.
+
+    kill() corta en ≤ ~85ms: frena la generación (evento `stop` de Pocket) y deja
+    de escribir al parlante. Así el barge-in funciona igual que con afplay.
+    """
+
+    def __init__(self, text):
+        import numpy as np
+        self._np = np
+        self._stop = threading.Event()
+        self.first_audio_s = None  # latencia al primer chunk (para [tiempos])
+        self._t0 = time.time()
+        self._thread = threading.Thread(target=self._run, args=(text,), daemon=True)
+        self._thread.start()
+
+    def _run(self, text):
+        np = self._np
+        try:
+            out = _out_stream(int(_pocket.sample_rate))
+            for piece in _split_for_tts(text):
+                for chunk in _pocket.generate_audio_stream(_pocket_voice, piece, stop=self._stop):
+                    if self._stop.is_set():
+                        return
+                    a = chunk.numpy() if hasattr(chunk, "numpy") else np.asarray(chunk)
+                    pcm = (np.clip(np.squeeze(a), -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+                    if self.first_audio_s is None:
+                        self.first_audio_s = time.time() - self._t0
+                    for i in range(0, len(pcm), _OUT_BLOCK * 2):
+                        if self._stop.is_set():
+                            return
+                        out.write(pcm[i:i + _OUT_BLOCK * 2])
+        except Exception as e:  # noqa: BLE001 — un fallo de audio no tumba el loop
+            log(f"  Pocket TTS stream error: {e!r}")
+
+    def poll(self):
+        return None if self._thread.is_alive() else 0
+
+    def kill(self):
+        self._stop.set()
+
+    def wait(self, timeout=None):
+        self._thread.join(timeout)
+        return self.poll()
+
+
+def _start_speech(text, voice):
+    """Empieza a hablar YA y devuelve un player (poll/kill/wait).
+
+    Pocket TTS en streaming si cargó; si no, WAV de Piper + afplay (fallback).
+    """
+    if _load_pocket() is not None:
+        log("  [voz] Pocket TTS (streaming)")
+        return _StreamPlayer(text)
+    return _play_wav_async(_synthesize(text, voice))
+
+
+def speak(text, voice):
+    """Habla de forma bloqueante (saludos, despedidas, avisos proactivos).
+
+    Toma `_audio_lock`: como la voz proactiva (otro thread) también pasa por acá,
+    el lock evita que dos audios se solapen.
     """
     with _audio_lock:
-        wav = _synthesize(text, voice)
-        _play_wav_async(wav).wait()
+        _start_speech(text, voice).wait()
 
 
 # Anti-eco: mientras FRIDAY habla, el mic capta su PROPIA voz (eco acústico) y Vosk
@@ -493,13 +619,33 @@ def speak(text, voice):
 # sería AEC o auriculares, pero esto corta el 95% de los falsos positivos.
 INTERRUPT_GRACE_S = 0.8
 INTERRUPT_MIN_CHARS = 5
+# (4) Filtro de eco por CONTENIDO: con los parlantes de la MacBook el mic capta la
+# propia voz de FRIDAY y Vosk la transcribe ("currently using six point…") → se
+# cortaba sola (visto en el log real). Si la mayoría de lo "oído" coincide con lo
+# que FRIDAY está diciendo, es eco. Calibrado: ecos 0.67–1.0, interrupciones reales
+# 0.0–0.14.
+ECHO_OVERLAP = 0.5
 
 
-def _play_with_interrupt(wav, stream, model):
-    """Reproduce un WAV escuchando si el usuario interrumpe. True si interrumpió."""
+def _is_echo(heard, said):
+    """True si `heard` es (casi) la propia voz de FRIDAY diciendo `said`."""
+    import difflib
+    heard_w = re.findall(r"[a-z']+", heard.lower())
+    said_w = set(re.findall(r"[a-z']+", (said or "").lower()))
+    if not heard_w or not said_w:
+        return False
+    hits = sum(1 for w in heard_w
+               if w in said_w or difflib.get_close_matches(w, said_w, n=1, cutoff=0.7))
+    return hits / len(heard_w) >= ECHO_OVERLAP
+
+
+def _play_with_interrupt(player, stream, model, said=""):
+    """Mientras `player` suena, escucha si el usuario interrumpe. True si interrumpió.
+
+    `said` es el texto que FRIDAY está diciendo: se usa para descartar el eco.
+    """
     from vosk import KaldiRecognizer
 
-    player = _play_wav_async(wav)
     interrupt_rec = KaldiRecognizer(model, 16000)
     start = time.time()
 
@@ -515,7 +661,9 @@ def _play_with_interrupt(wav, stream, model):
             continue
         if final:
             spoken = json.loads(interrupt_rec.Result()).get("text", "").strip()
-            if len(spoken) >= INTERRUPT_MIN_CHARS:
+            if len(spoken) >= INTERRUPT_MIN_CHARS and _is_echo(spoken, said):
+                log(f"  [eco ignorado] '{spoken}'")
+            elif len(spoken) >= INTERRUPT_MIN_CHARS:
                 log(f"  [interrupción] '{spoken}'")
                 _stop_player(player)
                 return True
@@ -713,15 +861,16 @@ def _listen_turn(stream, model, vad_threshold):
         (text, stt_dt, spoke). text=None si pasó CONV_SILENCE_TIMEOUT sin hablar;
         text="" si fue un ruido demasiado corto (el caller hace continue).
     """
-    preroll = collections.deque(maxlen=PREROLL_CHUNKS)
+    preroll = collections.deque(maxlen=PREROLL_CHUNKS * 4000 // LISTEN_CHUNK)
     frames = bytearray()
     speech_started = False
     speech_start = last_voice = 0.0
     idle_start = time.time()
+    spec = None  # Future del STT especulativo (sobre el audio hasta el inicio del silencio)
 
     while True:
         try:
-            data = stream.read(4000, exception_on_overflow=False)
+            data = stream.read(LISTEN_CHUNK, exception_on_overflow=False)
         except OSError:
             continue
         now = time.time()
@@ -739,17 +888,24 @@ def _listen_turn(stream, model, vad_threshold):
             continue
 
         frames += data
+        silence = now - last_voice
         if voiced:
             last_voice = now
-        elif now - last_voice >= END_SILENCE_S:
+            spec = None  # seguías hablando: el especulativo quedó viejo
+        elif silence >= END_SILENCE_S:
             break  # silencio sostenido → fin del turno
+        elif (silence >= SPECULATIVE_STT_S and spec is None
+              and last_voice - speech_start >= MIN_SPEECH_S):
+            spec = _STT_POOL.submit(_transcribe_impl, bytes(frames))
 
     spoke = last_voice - speech_start
     if spoke < MIN_SPEECH_S:
         return "", 0.0, 0.0  # ruido corto, no es un turno real
 
+    # stt_dt = lo que el STT tarda DESPUÉS del endpoint (lo que se percibe).
     t_stt = time.time()
-    text = (_transcribe(bytes(frames)) or "").strip().lower()
+    text = (spec.result() if spec is not None else _transcribe(bytes(frames)) or "")
+    text = (text or "").strip().lower()
     if not text:  # fallback Vosk si Whisper no devolvió nada
         from vosk import KaldiRecognizer
         r = KaldiRecognizer(model, 16000)
@@ -834,19 +990,26 @@ def _run_conversation(stream, model, voice):
 
         # ── Responder con voz (Pocket TTS ~200ms) + interrupción ──────
         _set_light("responding")  # ámbar/dorado: FRIDAY hablando
-        t_tts = time.time()
-        wav = _synthesize(answer, voice)
-        interrupted = _play_with_interrupt(wav, stream, model)
-        tts_dt = time.time() - t_tts
+        player = _start_speech(answer, voice)
+        interrupted = _play_with_interrupt(player, stream, model, said=answer)
+        first = getattr(player, "first_audio_s", None)
+        tts_first = f"{first:.2f}s" if first is not None else "n/a"
+        # Latencia percibida: desde que dejaste de hablar hasta que FRIDAY suena.
+        # = silencio de endpoint + espera de STT + LLM + primer audio del TTS.
+        perceived = END_SILENCE_S + stt_dt + llm_dt + (first or 0.0)
+        log(f"  [tiempos] respuesta ~{perceived:.1f}s = endpoint {END_SILENCE_S:.1f}s + "
+            f"STT {stt_dt:.2f}s + LLM {llm_dt:.2f}s + TTS 1er audio {tts_first}")
 
         if interrupted:
             # "Yes?" rápido y volver a escuchar
-            ack_wav = _synthesize("Yes?", voice)
-            ack_player = _play_wav_async(ack_wav)
-            ack_player.wait(timeout=2)
+            # wait(timeout) en un Popen (fallback Piper) LANZA TimeoutExpired: eso
+            # tumbaba el listener entero (visto en el log). Nunca debe cortar el loop.
+            ack = _start_speech("Yes?", voice)
+            try:
+                ack.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                ack.kill()
             log("  [conversacion] interrumpido. Te escucho...")
-        else:
-            log(f"  [tiempos] LLM {llm_dt:.1f}s | TTS {tts_dt:.1f}s")
 
         last_activity = time.time()
 

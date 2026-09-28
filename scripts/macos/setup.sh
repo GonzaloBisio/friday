@@ -35,7 +35,7 @@ PIPER=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/hig
 for f in en_US-ryan-high.onnx en_US-ryan-high.onnx.json; do
     [ -f "$VOICES/$f" ] || curl -sSfL -o "$VOICES/$f" "$PIPER/$f"
 done
-[ -f "$VOICES/jarvis.wav" ] || echo "  (sin voices/jarvis.wav: se usa la voz de catálogo TTS_VOICE, default charles)"
+[ -f "$VOICES/jarvis.wav" ] || echo "  (sin voices/jarvis.wav: se usa la voz de catálogo TTS_VOICE, default michael)"
 # whisper-large-v3-turbo (MLX, ~1.6GB) se baja solo en el primer arranque del listener.
 
 step "4/6 Ollama (servicio al login) + $OLLAMA_MODEL"

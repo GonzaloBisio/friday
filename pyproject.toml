@@ -46,6 +46,8 @@ voice = [
     "numpy>=2.0",
     # STT en la GPU de Apple Silicon (Metal). Solo macOS arm64.
     "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # STT default en Apple Silicon: 0.14s por frase (7x más rápido que whisper-turbo).
+    "parakeet-mlx; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 dev = ["pytest>=8.0", "pytest-mock>=3.12", "pytest-asyncio>=0.23", "respx>=0.21", "ruff>=0.4"]
 

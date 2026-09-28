@@ -45,7 +45,9 @@ async def post_chat(request: Request, body: ChatRequest) -> ChatResponse:
 
     if brain is None:
         return ChatResponse(
-            response="FRIDAY no tiene el cerebro configurado. Configurá GEMINI_API_KEY en .env",
+            # Se dice en VOZ con una voz inglesa: en español salía ininteligible y
+            # el eco de ese audio disparaba falsas interrupciones.
+            response="My brain isn't configured yet, sir. Please set the Gemini API key.",
             model="none",
         )
 
@@ -65,10 +67,10 @@ async def post_chat(request: Request, body: ChatRequest) -> ChatResponse:
         result = await loop.run_in_executor(
             None, brain.chat, body.message, body.model
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("Error en brain.chat")
         return ChatResponse(
-            response=f"Error interno: {exc}",
+            response="Something went wrong on my end, sir. Please try again.",
             model="error",
         )
 
