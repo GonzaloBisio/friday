@@ -41,7 +41,11 @@ uso y `keep_alive=30m`). "shutdown" por voz descarga el modelo, no mata el servi
 7. **Interrupción** — mientras habla, el mic sigue: si decís algo con sustancia (≥5 chars, tras 0.8 s de
    gracia) que **no** sea eco de lo que FRIDAY está diciendo (`_is_echo`, ≥50% de palabras en común),
    corta en ≤0.1 s y te atiende.
-8. **Mute** — "mute" silencia; queda escuchando solo "resume" (grammar Vosk, sin Whisper ni LLM).
+8. **¿Es para FRIDAY?** (`_addressed_to_friday`) — dentro de 12 s desde su última respuesta es
+   charla continua; después hay que nombrarla ("Friday, …"); >15 s de voz sin nombrarla = otra
+   conversación (se ignora sin mandarla al cerebro ni guardarla en el log). 60 s sin un turno válido
+   → vuelve a esperar la wake word. Comandos cortos (stop/mute/shutdown) valen siempre.
+9. **Mute** — "mute" silencia; queda escuchando solo "resume" (grammar Vosk, sin Whisper ni LLM).
 
 ## El cerebro
 
@@ -52,7 +56,8 @@ uso y `keep_alive=30m`). "shutdown" por voz descarga el modelo, no mata el servi
   tier). Detalle y costos en [MODELS.md](MODELS.md).
 - **Thinking** — la familia 3.x siempre piensa y el thinking consume `max_output_tokens`: techo 1024 y
   `thinking_level` por modelo. La brevedad para voz ("two sentences") la impone el prompt.
-- **Fallback** — un 429 de Gemini degrada esa respuesta a Ollama con el **mismo** `chat_repo` + sesión:
+- **Fallback** — un 5xx (p. ej. `503 UNAVAILABLE · high demand`) reintenta una vez con otro modelo de
+  Gemini; si persiste, o ante un 429 o sin red, esa respuesta sale de Ollama con el **mismo** `chat_repo` + sesión:
   Ollama carga la conversación desde SQLite (fuente de verdad neutral) y la continúa.
 - **Contexto acotado** — ventana de 12 turnos cortando en bordes de turno (nunca un
   `function_response` huérfano), memorias (≤30) en el system prompt, **prefijo estable** (fecha, no

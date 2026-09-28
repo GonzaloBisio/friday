@@ -243,6 +243,36 @@ class TestQuotaFallback:
             brain.chat("hola")
 
 
+class TestServerErrorFallback:
+    """503 "high demand" (visto en el log real): reintenta con otro modelo de Gemini
+    y, si sigue caído, responde con Ollama local en vez de "Something went wrong"."""
+
+    def _unavailable(self):
+        from google.genai import errors
+        return errors.ServerError(503, {"error": {"message": "high demand", "status": "UNAVAILABLE", "code": 503}})
+
+    def test_503_retries_on_other_gemini_model(self, brain):
+        brain._mock_client.models.generate_content.side_effect = [self._unavailable(), _make_text_response("ok")]
+        result = brain.chat("hola")
+        assert result.text == "ok"
+        models = [c.kwargs["model"] for c in brain._mock_client.models.generate_content.call_args_list]
+        assert models[0] != models[1]
+
+    def test_503_twice_falls_back_to_ollama(self, brain):
+        brain._mock_client.models.generate_content.side_effect = self._unavailable()
+        with patch("friday.core.ollama_brain.OllamaBrain") as mock_ollama_cls:
+            mock_ollama_cls.return_value.reply.return_value = ChatResult(text="Local, sir.", model="gemma4")
+            result = brain.chat("hola")
+        assert result.text == "Local, sir."
+
+    def test_no_network_falls_back_to_ollama(self, brain):
+        import httpx
+        brain._mock_client.models.generate_content.side_effect = httpx.ConnectError("sin red")
+        with patch("friday.core.ollama_brain.OllamaBrain") as mock_ollama_cls:
+            mock_ollama_cls.return_value.reply.return_value = ChatResult(text="Offline, sir.", model="gemma4")
+            assert brain.chat("hola").text == "Offline, sir."
+
+
 class TestHistoryWindow:
     """La ventana de historial acota los tokens: el brain es singleton y sin
     techo el contexto crece sin parar. Recorta en bordes de turno."""

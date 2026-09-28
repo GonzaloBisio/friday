@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import time
+
+import httpx
 from typing import Any
 
 from google import genai
@@ -115,7 +117,14 @@ class FridayBrain:
         # fallback). El finally garantiza registrarla aunque se propague un error.
         start = time.perf_counter()
         try:
-            return self._run_tool_loop(selected_model)
+            return self._run_with_cloud_retry(selected_model)
+        except (genai_errors.ServerError, httpx.TransportError) as exc:
+            # 5xx que persistió tras reintentar con otro modelo, o sin red (visto en
+            # el log real: "503 UNAVAILABLE · high demand" → FRIDAY respondía "Something
+            # went wrong"). Mejor una respuesta local que ninguna.
+            logger.warning("Gemini no disponible (%s); fallback a Ollama local.", exc)
+            health_tracker.record_fallback()
+            return self._fallback_to_ollama(user_message)
         except genai_errors.ClientError as exc:
             # 429 RESOURCE_EXHAUSTED: se acabó la cuota de Gemini. En vez de quedar
             # mudos, degradamos a Ollama local para esta respuesta. Cualquier otro
@@ -127,6 +136,24 @@ class FridayBrain:
             return self._fallback_to_ollama(user_message)
         finally:
             health_tracker.record_latency((time.perf_counter() - start) * 1000)
+
+    def _run_with_cloud_retry(self, selected_model: str) -> ChatResult:
+        """Tool loop con UN reintento en otro modelo de Gemini ante 5xx.
+
+        El 503 "high demand" es por modelo: el escalón balanced (otro modelo, otra
+        capacidad) suele estar disponible y responde en ~1 s, mucho mejor que caer
+        directo al local. Si también falla, el ServerError sube y chat() degrada.
+        """
+        try:
+            return self._run_tool_loop(selected_model)
+        except genai_errors.ServerError as exc:
+            alt = settings.gemini_model_balanced
+            if alt == selected_model:
+                alt = settings.gemini_model_fast
+            if alt == selected_model:
+                raise
+            logger.warning("Gemini %s devolvió %s; reintento con %s.", selected_model, exc.code, alt)
+            return self._run_tool_loop(alt)
 
     def _run_tool_loop(self, selected_model: str) -> ChatResult:
         """Loop de function calling contra Gemini. Puede lanzar ClientError."""

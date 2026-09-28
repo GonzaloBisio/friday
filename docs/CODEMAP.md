@@ -13,11 +13,11 @@
 voices/  (Vosk, Piper, jarvis.wav)        LaunchAgent com.friday.wake (al login)
    │                                                │
    ▼                                                ▼
-friday/voice/wake.py ── main():1258 ─ Vosk grammar ["friday",…] ─► "friday" detectada
-   │  ├─ speak() saludo ─ _synthesize():467  _start_speech → _StreamPlayer (Pocket streaming → PyAudio) │ Piper+afplay
+friday/voice/wake.py ── main():1299 ─ Vosk grammar ["friday",…] ─► "friday" detectada
+   │  ├─ speak() saludo ─ _synthesize():476  _start_speech → _StreamPlayer (Pocket streaming → PyAudio) │ Piper+afplay
    │  ├─ launch_friday() → start.sh (si :8000 no responde) → Ollama + friday.app
-   │  └─ conversation_loop → _run_conversation():1043
-   │        ├─ _listen_turn():963   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
+   │  └─ conversation_loop → _run_conversation():1070
+   │        ├─ _listen_turn():990   VAD RMS c/100ms, cierra a 0.8s; STT especulativo a 0.3s
    │        ├─ _transcribe()        Parakeet (GPU, _STT_POOL) │ whisper-turbo │ faster-whisper │ Vosk
    │        ├─ ask_friday() ── HTTP POST 127.0.0.1:8000/api/chat ──────────────┐
    │        └─ _play_with_interrupt()  barge-in con filtro de eco (_is_echo)      │
@@ -25,7 +25,7 @@ friday/voice/wake.py ── main():1258 ─ Vosk grammar ["friday",…] ─► "
 friday/api/routes_chat.py:40 post_chat ─► brain.chat(msg, model="auto") (thread executor)
    │
    ▼
-friday/core/brain.py  FridayBrain.chat():87           (Gemini; Ollama = ollama_brain.py)
+friday/core/brain.py  FridayBrain.chat():89           (Gemini; Ollama = ollama_brain.py)
    ├─ _select_model()/_classify()  fast │ balanced │ reasoning (solo "pro" explícito)
    ├─ _compact_old_tool_results()  recorta resultados de turnos previos (context_window.py)
    ├─ with_time_note(msg)          hora en el mensaje → prefijo estable → cache
@@ -34,7 +34,7 @@ friday/core/brain.py  FridayBrain.chat():87           (Gemini; Ollama = ollama_b
    │     └─ function_call → _execute_tool → ToolsRegistry.execute (_coerce_args)
    │                         └─ tool gated → PermissionGate.request (agent/permissions.py)
    │                               LOW → ejecuta · MEDIUM/HIGH → pending_confirmation
-   └─ 429 sin cuota → _fallback_to_ollama():186 (mismo chat_repo/session → continuidad)
+   └─ 429 sin cuota → _fallback_to_ollama():213 (mismo chat_repo/session → continuidad)
 ```
 
 ### Bootstrap y fondo

@@ -149,6 +149,15 @@ _STT_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="friday-stt")
 # Tras la wake word, FRIDAY entra en modo conversación: escucha tu
 # consulta, la manda al cerebro y responde con voz, en loop.
 CONV_SILENCE_TIMEOUT = 60  # seg sin hablar -> vuelve a esperar "friday"
+# ── A quién le hablás (visto en el log real: FRIDAY transcribía y "respondía" una
+# charla tuya con otra persona, frases de 10-22 s en español). Reglas:
+#   · dentro de FOLLOWUP_S desde que FRIDAY terminó de hablar → es para ella (charla continua);
+#   · pasado eso, solo si la nombrás ("Friday, …");
+#   · más de MAX_TURN_S de voz sin nombrarla → es otra conversación, se ignora;
+#   · comandos cortos (stop/mute/shutdown) valen siempre.
+# Lo ignorado NO va al cerebro ni al log (solo su duración): privacidad.
+FOLLOWUP_S = float(os.environ.get("FRIDAY_FOLLOWUP", "12"))
+MAX_TURN_S = float(os.environ.get("FRIDAY_MAX_TURN", "15"))
 
 # ── Endpointing por silencio (reemplaza el endpoint ansioso de Vosk) ──────────
 # El problema: Vosk cerraba el turno apenas hacías una pausa natural y te cortaba
@@ -663,6 +672,24 @@ def _is_tail_echo(heard, said):
     return _is_echo(heard, tail)
 
 
+def _addressed_to_friday(text, spoke_s, since_reply_s):
+    """True si el turno es para FRIDAY; si no, el motivo (str) para el log.
+
+    since_reply_s: segundos entre el fin de la última respuesta y el inicio del habla.
+    """
+    words = [w.strip(string.punctuation) for w in text.lower().split()]
+    named = "friday" in words or "fraidey" in words
+    if len(words) <= 4 and _matches_any(text, SHUTDOWN_WORDS + EXIT_WORDS + MUTE_WORDS):
+        return True
+    if named:
+        return True
+    if spoke_s > MAX_TURN_S:
+        return "muy largo sin nombrarme"
+    if since_reply_s > FOLLOWUP_S:
+        return "fuera de la ventana de seguimiento"
+    return True
+
+
 def _speakable(text):
     """Deja solo lo pronunciable: sin emojis, pictogramas ni símbolos de markdown.
 
@@ -1053,6 +1080,8 @@ def _run_conversation(stream, model, voice):
     vad_threshold = _calibrate_vad(stream)
     last_activity = time.time()
     last_answer = ""  # lo último que dijo FRIDAY (filtro de eco de cola)
+    last_reply_end = time.time()  # fin de lo último que dijo FRIDAY (ventana de seguimiento)
+    last_accepted = time.time()   # último turno que SÍ era para FRIDAY
 
     while True:
         _set_light("listening")  # celeste: te estoy escuchando
@@ -1070,6 +1099,17 @@ def _run_conversation(stream, model, voice):
             last_answer = ""  # solo el primer turno después de hablar puede ser cola
             continue
         last_answer = ""
+        speech_start = time.time() - stt_dt - END_SILENCE_S - spoke
+        verdict = _addressed_to_friday(text, spoke, speech_start - last_reply_end)
+        if verdict is not True:
+            log(f"  [ambiente ignorado · {spoke:.0f}s de voz · {verdict}]")
+            if time.time() - last_accepted > CONV_SILENCE_TIMEOUT:
+                log("  [conversacion] nadie me habla hace rato; vuelvo a esperar 'friday'.")
+                _set_light("idle")
+                _emit_voice("idle")
+                return
+            continue
+        last_accepted = time.time()
         last_activity = time.time()
         log(f"  Vos: {text}  [habla {spoke:.1f}s | STT {stt_dt:.1f}s]")
         _emit_voice("thinking", text=text, who="you")
@@ -1119,6 +1159,7 @@ def _run_conversation(stream, model, voice):
         player = _start_speech(answer, voice)
         interrupted = _play_with_interrupt(player, stream, model, said=answer)
         last_answer = "" if interrupted else answer
+        last_reply_end = time.time()
         first = getattr(player, "first_audio_s", None)
         tts_first = f"{first:.2f}s" if first is not None else "n/a"
         # Latencia percibida: desde que dejaste de hablar hasta que FRIDAY suena.

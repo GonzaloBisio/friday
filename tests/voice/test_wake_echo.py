@@ -58,3 +58,17 @@ def test_speakable_strips_emoji_and_markdown():
     from friday.voice.wake import _speakable
     assert _speakable("✨") == ""
     assert _speakable("Done, sir! 🚀 **All** set.") == "Done, sir! All set."
+
+
+# ── ¿Es para FRIDAY? (visto en el log real: respondía una charla ajena) ──────
+@pytest.mark.parametrize("text,spoke,since,expected", [
+    ("open the dashboard", 1.5, 3.0, True),                     # seguimiento inmediato
+    ("what about the disk?", 2.0, 30.0, "fuera de la ventana de seguimiento"),
+    ("friday, what about the disk?", 2.0, 30.0, True),          # la nombraste
+    ("básicamente se la comenzaron la regresión el frontend", 21.9, 2.0, "muy largo sin nombrarme"),
+    ("shut down", 1.0, 90.0, True),                             # comando corto: siempre
+    ("stop", 0.6, 45.0, True),
+])
+def test_addressed_to_friday(text, spoke, since, expected):
+    from friday.voice.wake import _addressed_to_friday
+    assert _addressed_to_friday(text, spoke, since) == expected
