@@ -1,134 +1,112 @@
 # FRIDAY — Arquitectura (estado actual)
 
-> QUÉ es y CÓMO funciona hoy. Para la visión y lo que falta, ver [ROADMAP.md](ROADMAP.md).
+> QUÉ es y POR QUÉ está hecho así. Dónde está cada cosa: [CODEMAP.md](CODEMAP.md) ·
+> tools: [TOOLS.md](TOOLS.md) · modelos: [MODELS.md](MODELS.md) · a dónde va: [ROADMAP.md](ROADMAP.md).
 
-FRIDAY es un asistente personal por voz, **100% local y gratis**. Corre repartido entre
-**Windows** (captura de micrófono y reproducción de audio) y **WSL/Ubuntu** (cerebro,
-API, dashboard, datos). Esa división existe porque el micrófono y el audio viven en
-Windows, y el resto del stack (Python, Ollama, etc.) vive cómodo en WSL.
+FRIDAY es un asistente personal por voz, **local-first**, que corre **entero en una Mac Apple Silicon**:
+un proceso *listener* (micrófono, wake word, STT, TTS) y un proceso *backend* (API, cerebro, tools,
+scheduler, datos), hablando por HTTP y WebSocket en `127.0.0.1`.
 
-```
-┌─────────────────── Windows ───────────────────┐      ┌──────────────── WSL (Ubuntu) ────────────────┐
-│  windows_wake.py (listener, py 3.12)           │      │  friday.app  (FastAPI + scheduler)            │
-│   • Wake word: Vosk (grammar restringida)      │      │   • API REST  :8000                           │
-│   • STT: faster-whisper (small.en, CPU)        │ HTTP │   • Dashboard Streamlit :8510                 │
-│   • TTS: Pocket TTS (voz Jarvis clonada)       │─────▶│   • Brain: Ollama qwen2.5:7b (function calling)│
-│     fallback → Piper/Ryan                      │ /api │   • Tools + Agent/PermissionGate              │
-│   • Reproduce audio (PowerShell SoundPlayer)   │/chat │   • Collectors (system, nexcourt, gemini)     │
-└────────────────────────────────────────────────┘      │   • SQLite (métricas, chat, notificaciones)   │
-                                                         │   • Ollama server :11434                      │
-                                                         └───────────────────────────────────────────────┘
-```
+> Historia: hasta 2026-09 corría repartido entre Windows (voz) y WSL/Ubuntu (backend), porque el
+> micrófono vivía en Windows. En la Mac todo está en el mismo host y ese puente (interop `cmd.exe`,
+> PowerShell, `wsl --shutdown`) se retiró. Ver el historial de git si hiciera falta.
 
-## El pipeline de voz (turno completo)
+## Los dos procesos
 
-1. **Wake word** — `friday/voice/windows_wake.py` escucha con **Vosk** y una *grammar*
-   restringida (`["friday","hey","wake up"]`). Vocabulario chico = detección casi instantánea.
-2. **Arranque** — al detectar "FRIDAY", el listener saluda y, si el backend no está vivo,
-   lanza en WSL: `ollama serve` (si hace falta) + `./venv/bin/friday` (`launch_friday()`).
-3. **Escucha (STT)** — el endpointing es por **energía del mic (RMS)**: bufferea mientras hay voz
-   y cierra el turno recién tras ~1.3s de silencio sostenido (`_listen_turn`), así una pausa para
-   pensar NO te corta a mitad de frase. El audio crudo lo transcribe **faster-whisper** (`small.en`,
-   CPU int8) — muy superior con acento; Vosk queda como fallback si Whisper no devuelve nada.
-4. **Cerebro** — el texto va por HTTP a `POST /api/chat` → `OllamaBrain.chat()`
-   (`friday/core/ollama_brain.py`). Usa **qwen2.5:7b** vía Ollama con *function calling*.
-5. **Voz (TTS)** — la respuesta se sintetiza con **Pocket TTS** (Kyutai), voz **clonada de
-   Jarvis** desde `voices/jarvis.wav`, local en CPU (~1.4s). Si Pocket TTS no cargó, cae a
-   **Piper/Ryan**. Se reproduce con `Media.SoundPlayer.PlaySync()` (solo PCM int16).
-6. **Interrupción** — mientras FRIDAY habla, el mic sigue escuchando; si hablás, corta y atiende.
-7. **Mute** — si decís *"mute"*, FRIDAY se silencia y deja de procesarte; queda escuchando
-   SOLO *"unmute"* con una grammar Vosk restringida (sin Whisper ni cerebro, sin timeout)
-   hasta que lo reactivás. Vive en `conversation_loop` (`_muted_wait`).
+| | Listener (`friday/voice/wake.py`) | Backend (`friday.app`) |
+|---|---|---|
+| Arranca | LaunchAgent `com.friday.wake` al login | lo lanza el listener (`start.sh`) al oír "FRIDAY", o a mano |
+| Hace | wake word, VAD, STT, TTS, barge-in, mute, avisos proactivos | API + HUD `:8000`, cerebro, tools, collectors, scheduler, SQLite |
+| Por qué separado | la voz tiene que estar siempre escuchando con poca RAM; el backend solo cuando se usa | se reinicia/actualiza sin cortar la escucha |
 
-> Tiempos típicos por turno: STT ~1s · LLM ~1-2s · TTS ~1.4s.
+Ollama corre como servicio de `brew services` al login (idle ≈ sin RAM; el modelo se carga al primer
+uso y `keep_alive=30m`). "shutdown" por voz descarga el modelo, no mata el servicio.
 
-## El cerebro y las tools
+## Pipeline de voz (un turno)
 
-- **Factory** — `friday/core/brain_factory.py` elige el cerebro según `settings.llm_provider`:
-  - `gemini` (**default**): `FridayBrain` (`core/brain.py`), nube, requiere `GEMINI_API_KEY`.
-    Modelo `gemini-2.0-flash` (barato, mejor en function-calling que qwen). El routing `auto`
-    sube a `2.5-flash` solo en consultas complejas; **nunca** a `pro`. Tope de gasto en la API key.
-  - `ollama`: `OllamaBrain`, local, sin costo, offline. Modelo `qwen2.5:7b`. Flip de `llm_provider`.
-- **Contrato común** — `core/llm_base.py` (`Brain` Protocol, `ChatResult`). Intercambiables.
-- **Function calling** — el brain expone *tools* y ejecuta las que el modelo pide, en loop
-  (`MAX_TOOL_ROUNDS`). Schemas generados desde type hints + docstrings (`core/tool_schema.py`).
+1. **Wake word** — Vosk con *grammar* restringida (`["friday","hey","wake up"]`): vocabulario chico =
+   detección casi instantánea y CPU mínima.
+2. **Arranque** — si `:8000` no responde, `launch_friday()` corre `start.sh` (pidfile, asegura Ollama) y
+   abre el HUD.
+3. **Escucha** — endpointing por **energía (RMS)**: cierra el turno tras ~1.3 s de silencio sostenido,
+   así una pausa para pensar no te corta.
+4. **STT** — **mlx-whisper `large-v3-turbo` en la GPU** (~1 s por frase en el M4); fallback
+   faster-whisper `small.en` (CPU) y, en último caso, el texto de Vosk.
+5. **Cerebro** — `POST /api/chat` → `brain.chat()` con function calling (ver abajo).
+6. **TTS** — Pocket TTS con la voz **clonada de Jarvis** (`voices/jarvis.wav`); fallback Piper/Ryan. El
+   texto se parte en bloques <35 tokens (Pocket saltea palabras si se pasa). Reproduce con `afplay`.
+7. **Interrupción** — mientras habla, el mic sigue: si decís algo con sustancia (≥5 chars, tras 0.8 s de
+   gracia anti-eco), corta y te atiende.
+8. **Mute** — "mute" silencia; queda escuchando solo "resume" (grammar Vosk, sin Whisper ni LLM).
 
-### Dos capas de tools (importante)
+## El cerebro
 
-1. **`ToolsRegistry`** (`core/tools_registry.py`) — las funciones que ve el LLM (todas de lectura):
-   `consultar_metricas`, `resumen_costos`, `obtener_fecha_hora`, y la observabilidad:
-   `estado_sistemas` (cubre NEXCOURT **y** AXIS, filtrable por `sistema`) y `metricas_servicio`.
-   En modo `cloudwatch` se suman `alarmas_activas` y `errores_recientes` (AWS en vivo); con
-   `axis_enabled` se suma `errores_axis` (logs del container vía SSH).
-2. **Agente con permisos** (`friday/agent/`) — la capa para **acciones con riesgo**:
-   - `registry.py`: `ActionRegistry` (allowlist) + `ActionSpec(name, description, risk, fn)` + `RiskLevel{LOW,MEDIUM,HIGH}`.
-   - `permissions.py`: `PermissionGate`. `LOW` ejecuta solo; `MEDIUM/HIGH` quedan **pendientes**
-     y devuelven un `action_id` hasta que el humano confirme (`confirm(action_id, approved)`).
-   - `setup.py`: expone **cada acción como una tool de primera clase** con su firma real
-     (`abrir_app(nombre)`, `cargar_gasto(monto, …)`), vía `_make_gated_tool` (functools.wraps +
-     PermissionGate). Antes todo iba detrás de una sola `ejecutar_accion_pc(accion, argumentos=JSON-string)`,
-     pero qwen2.5:7b no podía armar el JSON anidado y **narraba** el éxito sin llamar la tool.
-   - API: `routes_agent.py` → `GET /api/agent/tools`, `POST /api/agent/run`, `POST /api/agent/confirm`.
+- **Factory** (`core/brain_factory.py`) según `LLM_PROVIDER`: `gemini` (`FridayBrain`) u `ollama`
+  (`OllamaBrain`). Misma interfaz (`core/llm_base.py:Brain`), mismo system prompt.
+- **Routing** (`FridayBrain._classify`): mensajes cortos/métricas y el default → `fast`
+  (3.5-flash-lite); >200 chars → `balanced` (3.8-flash); `pro` **solo explícito** (preview, sin free
+  tier). Detalle y costos en [MODELS.md](MODELS.md).
+- **Thinking** — la familia 3.x siempre piensa y el thinking consume `max_output_tokens`: techo 1024 y
+  `thinking_level` por modelo. La brevedad para voz ("two sentences") la impone el prompt.
+- **Fallback** — un 429 de Gemini degrada esa respuesta a Ollama con el **mismo** `chat_repo` + sesión:
+  Ollama carga la conversación desde SQLite (fuente de verdad neutral) y la continúa.
+- **Contexto acotado** — ventana de 12 turnos cortando en bordes de turno (nunca un
+  `function_response` huérfano), memorias (≤30) en el system prompt, **prefijo estable** (fecha, no
+  hora) para cache implícito/KV-cache, y resultados de tools de turnos previos recortados a 600 chars
+  (`core/context_window.py`).
+- **Coerción de args** (`tools_registry._coerce_args`) — los LLM mandan `"24"` por `24` o dicts por
+  strings; se corrige según los type hints, el único punto por el que pasan todas las calls.
 
-> Este *gate* es la columna vertebral de "FRIDAY controla todo **con mi autorización**".
-> Todas las integraciones futuras se cuelgan de acá. Ver [ROADMAP.md](ROADMAP.md).
+### Dos capas de tools
 
-## Observabilidad (collectors)
+1. **`ToolsRegistry`** (`core/tools_registry.py`) — lo que ve el LLM. Schemas generados de firma +
+   docstring (`core/tool_schema.py`): **la 1ra línea del docstring es la descripción**.
+2. **Agente con permisos** (`friday/agent/`) — cada *acción* se registra con un `RiskLevel` y se expone
+   como tool de **primera clase** con su firma real (`agent/setup.py:_make_gated_tool`). Antes todo
+   iba detrás de `ejecutar_accion_pc(accion, argumentos=JSON-string)` y un 7B no armaba el JSON
+   anidado: narraba el éxito sin llamar la tool. El `PermissionGate` ejecuta LOW y deja MEDIUM/HIGH
+   pendientes de `confirm()` (hoy solo desde el HUD/API; por voz es el gap #1 del roadmap).
 
-`friday/collectors/` con patrón común (`base.Collector`): un scheduler los pollea y guarda
-`MetricPoint`s en SQLite.
+Catálogo completo con riesgo y fuente: [TOOLS.md](TOOLS.md) (generado; un test exige que esté al día).
 
-- `system.py` — CPU/RAM/disco de la máquina local.
-- `nexcourt.py` — pollea `/actuator/health` y `/actuator/prometheus` de cada microservicio
-  NEXCOURT **en hosts locales** (puertos de gestión **9081-9087** en modo `direct`, o vía
-  **Kong** en modo `kong`). Para docker-compose local.
-- `cloudwatch.py` — NEXCOURT **en producción (AWS ECS)**, 100% read-only. Estado y conteo de
-  tareas vía ECS API (`describe_services`), CPU/memoria vía CloudWatch (`get_metric_data`).
-  Emite con `source="nexcourt"` para reusar el wiring del dashboard/WebSocket. Se activa con
-  `nexcourt_mode="cloudwatch"`. ⚠️ Credenciales: IAM read-only dedicado, **nunca root**.
-- `axis.py` — AXIS **en el droplet DigitalOcean**, vía SSH (alias `axis`), read-only. Un solo
-  round-trip ejecuta `docker ps` + `docker stats`; emite `source="axis"` con status/cpu/mem por
-  container. Se activa con `axis_enabled=true`. Monitorea una lista explícita de containers.
-- `gemini_usage.py` — tracking de costo/tokens de Gemini (relevante solo si se usa Gemini).
+## Proactividad (el backend habla primero)
 
-## Almacenamiento, API y dashboard
+`notifier` (umbrales, cada 60 s) y `analyst` (tendencias estadísticas, cada 30 min; el LLM no decide
+anomalías) → `ProactiveDispatcher` aplica la política de severidad ("derecho a callarse": `critical`
+habla, `warning` solo notificación) → WS `/ws/live` → el listener muestra una notificación de macOS y,
+si corresponde y no estás conversando, lo dice. Briefings 08:30/22:00 (`compose()` con el modelo lite)
+y research diario 08:00 (digest markdown determinista, sin LLM en el camino crítico).
 
-- **SQLite** (`friday/storage/`) — `metrics_repo`, `chat_repo` (historial de conversaciones),
-  `notification_repo`, `memory_repo`. DB en `friday.db`.
-- **Conocimiento** (`friday/storage/knowledge_store.py`) — capa de DOCUMENTOS (no métricas):
-  archivos `.md` en `knowledge/<categoria>/<fecha>.md`. Hoy la usa `ResearchService`
-  (`core/research.py`): un job diario que junta novedades de IA/tech + backend y arma un
-  digest markdown determinista (links reales, sin LLM en el camino crítico). El cerebro lo
-  lee on-demand con `consultar_research`; el HUD lo muestra en el tab RESEARCH. Es la capa
-  de "inteligencia/second brain": telemetría va a SQLite, conocimiento va a markdown.
-- **API** (`friday/api/`) — FastAPI: `routes_chat`, `routes_agent`, `routes_status`,
-  `routes_notifications`, `routes_voice` (expone el log del listener), `ws` (websocket "thinking").
-- **Dashboard** (`friday/dashboard/`) — Streamlit en `:8510` (métricas, chat, estado de voz).
+## Datos
 
-## Stack y por qué (todo gratis/local)
+- **SQLite** `friday.db` (WAL, un `RLock` compartido por todos los repos porque APScheduler escribe
+  desde varios threads): métricas (purga >30 días), chat, notificaciones, memorias.
+- **Conocimiento** en markdown: `knowledge/<categoría>/<fecha>.md` — curable a mano, portable (Obsidian).
+- **Telemetría** a SQLite, **documentos** a markdown: regla de la casa.
+
+## Stack y por qué
 
 | Pieza | Tecnología | Por qué |
-|-------|-----------|---------|
-| Wake word | Vosk (small, grammar) | Offline, instantáneo, CPU mínima |
-| STT | faster-whisper `small.en` (CPU int8) | Mucho mejor con acento; gratis/local. GPU descartada (DLLs CUDA en Windows). |
-| Cerebro | Ollama `qwen2.5:7b` | Local, sin costo, soporta tools. Buena conversación. |
-| TTS | Pocket TTS (Kyutai, MIT) | Clona la voz de Jarvis, CPU ~1.4s, sin GPU. Fallback Piper. |
+|---|---|---|
+| Wake word | Vosk small + grammar | Offline, instantáneo, ~50 MB |
+| STT | mlx-whisper large-v3-turbo (Metal) | Mucho mejor con acento; ~1 s en GPU |
+| Cerebro | Gemini 3.x + Gemma 4 (Ollama) | Nube barata con buen tool calling; local gratis/offline |
+| TTS | Pocket TTS (Kyutai) → Piper | Clona la voz de Jarvis en CPU; Piper como red |
 | API/Sched | FastAPI + APScheduler | Estándar, liviano |
-| UI | Streamlit | Rápido de iterar |
-| Datos | SQLite | Cero infra |
-
-## Cómo corre todo
-
-- **Windows** lanza `windows_wake.py` (autostart oculto `friday-wake.vbs`, o `friday-wake.bat` visible para debug).
-  Pre-carga Pocket TTS y faster-whisper al arrancar (una vez).
-- **WSL** corre `friday.app` (API `:8000` + dashboard `:8510`) y `ollama serve` (`:11434`).
-  El listener lo levanta solo al decir "FRIDAY"; o manual con `start.sh` / `stop.sh`.
-- **Apagado**: decir "shutdown" (o `stop.sh`) → mata FRIDAY + Ollama y libera la RAM de WSL2.
+| UI | HUD HTML puro servido por la API | Sin build; Streamlit queda legacy (`--streamlit`) |
+| Datos | SQLite + markdown | Cero infra |
 
 ## Gotchas conocidos
 
-- **`127.0.0.1`, nunca `localhost`** para HTTP WSL↔Windows (si no, +21s por timeout IPv6).
-- **Pocket TTS clonado es gated** en HuggingFace: hay que aceptar términos + login local una vez.
-- **Media.SoundPlayer solo reproduce WAV PCM int16** (un WAV float sale mudo).
-- **`.bat` en ASCII puro**: nada de `chcp 65001` ni acentos/recuadros Unicode (rompe el parseo de CMD).
-- **No correr el `.bat` desde `\\wsl.localhost\...`** si te molesta el warning de UNC (es inofensivo).
+- **`127.0.0.1`, nunca `localhost`** en clientes HTTP: evita el intento IPv6 (`::1`) primero (+21 s de
+  timeout con Ollama).
+- **La API no tiene auth** → bind en `127.0.0.1` (`API_HOST`). El agente lee archivos sin confirmación.
+- **`.env` pisa los defaults**: una línea `GEMINI_MODEL_*=gemini-2.5-…` vieja rompe el cerebro.
+- **Ollama sin `num_ctx`** recorta el principio del prompt (el system prompt). Se fija en 8192.
+- **Gemma 4 piensa por defecto** → sin `think:false` gasta `num_predict` razonando y responde vacío
+  (`ollama_think`). Mismo patrón que Gemini 3.x con `max_output_tokens`.
+- **`ollama pull` puede salir con código 0 tras un timeout de red**: verificar con `ollama list`.
+- **Pocket TTS con clonado es gated** en HuggingFace: aceptar términos + `hf auth login`.
+- **"unmute" no está en el vocabulario de Vosk** → la palabra de reactivación es "resume".
+- **macOS `/` es el volumen sellado**: el disco se mide en `/System/Volumes/Data` (`platform_info.disk_path`).
+- **`pkill -f 'venv/bin/friday'` matchearía `friday-wake`**: el patrón está anclado en `shutdown_friday.sh`.

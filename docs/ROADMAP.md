@@ -60,7 +60,8 @@ el LLM las invoca por el mismo puente que las acciones de PC.
 **AXIS — droplet SSH + Docker (✅ implementado)**
 - **Dónde corre**: `axis-dev-droplet` (DigitalOcean), `ssh axis@174.138.52.161`. 7 containers
   Docker: backend (healthy), frontend, front, nginx, keycloak, postgres (healthy), logs. **No es AWS.**
-- **Acceso**: key nativa de WSL autorizada en el droplet; alias `axis` en `~/.ssh/config`.
+- **Acceso**: key SSH de la Mac autorizada en el droplet; alias `axis` en `~/.ssh/config`
+  (ver [MIGRATION.md](MIGRATION.md#parte-b--en-la-mac)).
 - **Cómo lo observa FRIDAY**: `collectors/axis.py` (SSH + `docker ps`/`docker stats`, read-only).
   Emite `source="axis"`. Se activa con `axis_enabled=true`.
 - **Tools**: `estado_sistemas("axis")`, `metricas_servicio("axis-…")`, `errores_axis(container)`.

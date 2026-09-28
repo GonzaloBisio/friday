@@ -1,5 +1,8 @@
 # FRIDAY — Documento de Diseño y Plan de Implementación
 
+> ⚠️ **Documento histórico (2026-06).** Describe el plan original en Windows. El estado actual está
+> en [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) y [CLAUDE.md](CLAUDE.md). No seguir estas instrucciones.
+
 > **Para:** Claude Code (sesión de implementación desde terminal)
 > **De:** Gonzalo
 > **Estado:** Aprobado para empezar — backend primero, luego shell del frontend

@@ -1,100 +1,61 @@
 # FRIDAY — Asistente personal por voz
 
-> Asistente personal estilo Jarvis: lo activás por voz diciendo **"FRIDAY"**, te
-> responde hablando, controla tu PC y tus apps **con tu autorización**, observa tus
-> sistemas y te junta inteligencia (research diario) en un **Command Center** propio.
+> Asistente estilo Jarvis: lo activás diciendo **"FRIDAY"**, te responde hablando, controla tu Mac
+> y tus apps **con tu autorización**, observa tus sistemas (NEXCOURT, AXIS) y te junta
+> inteligencia diaria en un **Command Center** propio.
 
-Corre repartido entre **Windows** (micrófono, wake word, voz) y **WSL/Ubuntu**
-(cerebro, API, dashboard, datos). El cerebro usa **Gemini** (`gemini-2.5-flash`) con
-fallback local a **Ollama** (`qwen2.5:7b`) si Gemini se queda sin cuota o estás offline.
+Corre **nativo en macOS (Apple Silicon)**: listener de voz, cerebro, API, HUD y datos en la misma
+máquina. Cerebro en la nube con **Gemini 3.x** (`gemini-3.5-flash-lite` por defecto) y cerebro local
+con **Gemma 4** vía Ollama (offline, o fallback automático si Gemini se queda sin cuota).
 
 ```
-┌──────────────── Windows ────────────────┐      ┌──────────────── WSL (Ubuntu) ───────────────┐
-│  windows_wake.py (listener, py 3.12)     │      │  friday.app  (FastAPI + scheduler)           │
-│   • Wake word: Vosk   • STT: Whisper     │ HTTP │   • API REST + Command Center  :8000          │
-│   • TTS: Pocket TTS (voz Jarvis clonada) │─────▶│   • Cerebro: Gemini (fallback Ollama)        │
-│   • Reproduce audio (PowerShell)         │ /api │   • Tools + Agent/PermissionGate             │
-│   • Autostart oculto: friday-wake.vbs    │      │   • Collectors + SQLite + Research diario     │
-└──────────────────────────────────────────┘      └───────────────────────────────────────────────┘
+┌──────────────────────────────── Mac (M4) ─────────────────────────────────┐
+│  friday/voice/wake.py  (LaunchAgent al login)                              │
+│    Vosk (wake word) → mlx-whisper (STT, GPU) → Pocket TTS/Piper → afplay   │
+│        │ HTTP 127.0.0.1:8000/api/chat          ▲ WS /ws/live (avisos)      │
+│        ▼                                        │                          │
+│  friday.app  (FastAPI + APScheduler)  ── HUD http://127.0.0.1:8000/        │
+│    Cerebro Gemini 3.x ⇄ fallback Ollama (Gemma 4)                          │
+│    Tools + PermissionGate · Collectors · SQLite · Research diario          │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Detalle profundo en [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · visión y roadmap en
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+Documentación: [docs/](docs/README.md) · mapa del código [CODEMAP](docs/CODEMAP.md) ·
+tools [TOOLS](docs/TOOLS.md) · modelos [MODELS](docs/MODELS.md) · migración desde Windows [MIGRATION](docs/MIGRATION.md).
 
 ---
 
-## Requisitos
+## Instalación (macOS, Apple Silicon)
 
-- **Windows 10/11** con **WSL2 + Ubuntu**.
-- **Python 3.12** en *ambos* lados (en Windows: pyaudio no tiene wheels para 3.13/3.14).
-- Un **micrófono**.
-- **GEMINI_API_KEY** (Google AI Studio). Con billing habilitado conviene poner un
-  **tope mensual** en la API key (p. ej. $4) — FRIDAY no lo controla, lo hace Google.
-- *(Opcional)* cuentas/credenciales de las integraciones que quieras usar (Spotify,
-  Google Sheets, AWS).
-
----
-
-## Instalación
-
-### Parte A — Backend (WSL/Ubuntu)
+Requisitos: macOS + [Homebrew](https://brew.sh), ~10 GB libres, micrófono. Opcional: `GEMINI_API_KEY`
+de Google AI Studio (sin key corre 100% local). Con billing habilitado, poné un **tope mensual** en la key.
 
 ```bash
-# 1. Clonar
-git clone <tu-repo-privado> friday && cd friday
-
-# 2. Entorno e instalación (instala TODO el backend de una)
-python3.12 -m venv venv
-source venv/bin/activate
-pip install -e .            # o  pip install -e ".[ir]"  para el emisor IR (luces)
-
-# 3. Ollama (cerebro local de fallback)
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:7b
-
-# 4. Configurar secretos (ver sección Configuración)
-cp .env.example .env && nano .env
+gh repo clone GonzaloBisio/friday ~/friday && cd ~/friday
+bash scripts/macos/setup.sh
 ```
 
-### Parte B — Listener de voz (Windows)
+`setup.sh` es idempotente y hace todo: `brew install python@3.12 portaudio ollama ffmpeg`, venv con
+Python 3.12 (`pip install -e ".[ir,voice,dev]"`), modelos de voz en `voices/`, Ollama como servicio al
+login + `gemma4:e4b-it-qat`, un `.env` inicial (`LLM_PROVIDER=ollama`) y el **autostart del listener**.
+La primera vez macOS pide permiso de **Micrófono**, y el listener baja `whisper-large-v3-turbo` (~1.6 GB).
 
-El listener corre en **Windows** (donde está el mic). Vive en una copia local que el
-autostart sincroniza desde WSL.
+> ¿Por qué Python 3.12? `vosk`, `pyaudio` y `ctranslate2` no siempre tienen wheels para 3.13+.
 
-```powershell
-# 1. Carpeta y dependencias (en PowerShell, con Python 3.12)
-mkdir C:\Users\<vos>\friday\voices
-py -3.12 -m pip install vosk pyaudio piper-tts faster-whisper pocket-tts websocket-client numpy
+### Voz de Jarvis
 
-# 2. Modelos → dejarlos en C:\Users\<vos>\friday\voices\
-#    - vosk-model-small-en-us-0.15      (wake word)    → alphacephei.com/vosk/models
-#    - en_US-ryan-high.onnx (+ .json)   (TTS fallback) → github.com/rhasspy/piper voices
-#    - jarvis.wav                       (clip ~9s para clonar la voz con Pocket TTS)
-```
-
-> Las rutas en `windows_wake.py` y los `.vbs/.bat` asumen el usuario `gonza`. Si el tuyo
-> es otro, ajustá `C:\Users\gonza\...` en `friday-wake.vbs`, `friday-wake.bat` y
-> `windows_wake.py` (constante `VOICES_DIR`).
-
-#### Autostart al iniciar sesión (recomendado)
-
-1. `Win + R` → escribí `shell:startup` → Enter.
-2. Copiá `friday-wake.vbs` a esa carpeta.
-3. Listo: en cada login arranca **oculto**, sincroniza el listener desde WSL y queda
-   escuchando "FRIDAY". (Para debug con logs: doble-click en `friday-wake.bat`.)
-
----
+Pocket TTS clona la voz desde `voices/jarvis.wav` (clip propio de ~9 s, versionado en git). El modelo
+con clonado es *gated*: aceptá los términos en https://huggingface.co/kyutai/pocket-tts y corré
+`./venv/bin/hf auth login` una vez. Sin eso, FRIDAY habla con Piper/Ryan.
 
 ## Configuración (`.env`)
 
-Copiá `.env.example` → `.env` y completá. Lo mínimo para que hable:
+Los defaults viven en `friday/config.py`; en `.env` va solo lo que cambies (plantilla: `.env.example`).
 
 ```ini
-GEMINI_API_KEY=tu-api-key        # requerido (provider por defecto: gemini)
-LLM_PROVIDER=gemini              # "ollama" para 100% local/offline
+LLM_PROVIDER=gemini        # "ollama" = 100% local/offline
+GEMINI_API_KEY=tu-api-key
 ```
-
-Integraciones opcionales (cada una se activa al poner sus credenciales):
 
 | Integración | Variables | Notas |
 |---|---|---|
@@ -103,62 +64,37 @@ Integraciones opcionales (cada una se activa al poner sus credenciales):
 | NEXCOURT (AWS) | cadena boto3 + `NEXCOURT_MODE=cloudwatch` | IAM **read-only** dedicado, nunca root |
 | AXIS (SSH) | `AXIS_ENABLED=true` | Alias `axis` en `~/.ssh/config` |
 
-> **Secretos**: nunca van al repo. `.env`, los tokens y los JSON de service account
-> están en `.gitignore`. No commitees keys.
+> **Secretos**: nunca van al repo (`.env`, tokens y JSON de service account están en `.gitignore`).
+> La API escucha solo en `127.0.0.1` (no tiene auth y el agente lee archivos): no la abras a la red.
 
----
+## Uso
 
-## Correr y verificar
+Normalmente **no arrancás nada a mano**: el listener corre desde el login; decís "FRIDAY", levanta el
+backend y abre el HUD.
 
 ```bash
-# Backend (WSL) — manual
-bash start.sh                       # API + dashboard en background (log en friday.log)
-bash stop.sh                        # apaga todo (FRIDAY + Ollama)
-
-# Verificar que el cerebro responde
-curl -s -X POST http://127.0.0.1:8000/api/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"hello","model":"auto"}'
+bash start.sh / bash stop.sh                    # backend a mano (log en friday.log)
+./venv/bin/friday --cli                         # chat por terminal
+launchctl kickstart -k gui/$(id -u)/com.friday.wake   # reiniciar el listener
+bash scripts/macos/uninstall_autostart.sh       # sacar el listener del login
+tail -f voices/friday-wake.log                  # log del listener
 ```
 
-- **Command Center (HUD)**: http://127.0.0.1:8000/
-- **API / Docs**: http://127.0.0.1:8000/docs
-
-En uso normal **no arrancás el backend a mano**: decís "FRIDAY" y el listener lo levanta
-solo y te abre el HUD.
-
-### Comandos de voz
+- **HUD**: http://127.0.0.1:8000/ · **API/Docs**: http://127.0.0.1:8000/docs
 
 | Decí… | Hace |
 |---|---|
-| **"FRIDAY"** | Activa (saluda + abre el HUD la primera vez) |
+| **"FRIDAY"** | Activa (saluda + levanta el backend y abre el HUD la primera vez) |
 | *(pedile cosas)* | "what time is it", "open Spotify", "qué hay nuevo de IA"… |
 | **"mute"** / **"resume"** | Silenciar / reactivar |
 | **"stop" / "bye"** | Termina la conversación (sigue escuchando "FRIDAY") |
-| **"shutdown"** | Apaga TODO (FRIDAY + Ollama + libera la RAM de WSL2) |
-
----
+| **"shutdown"** | Apaga el backend, descarga Gemma de la RAM y cierra el listener (vuelve al próximo login o con `launchctl kickstart`) |
 
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest -q
-```
-
-## Estructura
-
-```
-friday/
-  app.py            # bootstrap: API + scheduler + collectors + research
-  core/             # cerebros (gemini/ollama), tools, proactividad, research, briefing
-  agent/            # ActionRegistry + PermissionGate (acciones con riesgo)
-  collectors/       # telemetría → SQLite (system, nexcourt, axis, gemini_usage)
-  integrations/     # spotify, gastos, web_research, ir/lights
-  api/              # rutas FastAPI + WebSocket
-  storage/          # repos SQLite + KnowledgeStore (research en markdown)
-  dashboard_web/    # Command Center (HUD, HTML puro)
-  voice/            # windows_wake.py (listener) + shutdown
-docs/               # ARCHITECTURE.md · ROADMAP.md · README.md
+./venv/bin/python -m pytest -q          # incluye chequeo de que docs/TOOLS.md y CODEMAP.md están al día
+bash tests/voice/test_shutdown.sh       # integración: arranca y apaga el backend real
 ```
 
 ---
